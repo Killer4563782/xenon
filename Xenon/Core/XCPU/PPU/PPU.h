@@ -1,51 +1,160 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
+
+#include <memory>
 
 #include "PowerPC.h"
 
 #include "Core/RootBus/RootBus.h"
 
+class PPU_JIT;
+
+enum class eExecutorMode : u8 {
+  Interpreter,
+  JIT,
+  Hybrid
+};
+
+enum class eThreadState : u8 {
+  None,        // Not created
+  Unused,      // Should we create a handle? (Only really used in elf loading and single-core testing)
+  Sleeping,    // Waiting for wakeup
+  Halted,      // Halted, but ready for execution
+  Running,     // Running
+  Executing,   // Actively running opcodes
+  Resetting,   // Recreating handle, same as halted but will resume afterwards
+  Quiting      // Currently in a shutdown
+};
 class PPU {
 public:
-  PPU();
+  PPU(XENON_CONTEXT *inXenonContext, RootBus *mainBus, u64 resetVector, u32 PIR);
+  ~PPU();
 
-  void Initialize(XENON_CONTEXT *inXenonContext, RootBus *mainBus, u32 PVR,
-                  u32 PIR, const char *ppuName);
+  // Start execution
+  void StartExecution(bool setHRMOR = true);
 
-  void StartExecution();
+  // Calulate our Clocks Per Instruction
+  void CalculateCPI();
 
-  // Returns a pointer to a thread.
+  // Reset the PPU state
+  void Reset();
+
+  // Debug tools
+  void Halt(u64 haltOn = 0, bool requestedByGuest = false, s8 ppuId = 0, ePPUThread threadId = ePPUThread_None);
+  void Continue();
+  void ContinueFromException();
+  void Step(int amount = 1);
+
+  // Thread state machine
+  void ThreadStateMachine();
+
+  // Thread function
+  void ThreadLoop();
+
+  // Returns a pointer to a thread
   PPU_THREAD_REGISTERS *GetPPUThread(u8 thrdID);
 
-private:
-  // PPU running?
-  bool ppuRunning = false;
+  // Runs a specified number of instructions
+  void PPURunInstructions(u64 numInstrs, bool enableHalt = true);
 
-  // Reset ocurred or signaled?
-  bool systemReset = false;
+  // Sets the clocks per instruction
+  void SetCPI(u32 CPI) { clocksPerInstruction = CPI; }
+  // Gets the clocks per instruction
+  u32 GetCPI() { return clocksPerInstruction; }
+
+  // Checks if the thread is active
+  bool ThreadActive() {
+    return ppuThreadState == eThreadState::Executing ||
+           ppuThreadState == eThreadState::Running;
+  }
+
+  // Checks if the thread is halted
+  bool IsHalted() {
+    return ppuThreadState == eThreadState::Halted;
+  }
+
+  // Checks if the thread is halted
+  bool IsHaltedByGuest() {
+    return guestHalt && IsHalted();
+  }
+
+  // Returns the thread state
+  eThreadState ThreadState() { return ppuThreadState; }
+
+  // Get ppuState
+  PPU_STATE *GetPPUState() { return ppuState.get(); }
+
+  // Load a elf image from host memory. Copies into RAM
+  // Returns entrypoint
+  u64 loadElfImage(u8 *data, u64 size);
+
+  FILE *traceFile;
+
+  eExecutorMode currentExecMode = eExecutorMode::Interpreter;
+private:
+  // Thread handle
+  std::thread ppuThread;
+
+  // PPU running?
+  std::atomic<eThreadState> ppuThreadState = eThreadState::None;
+
+  // Thread active?
+  volatile bool ppuThreadActive = true;
+
+  // Thread resetting?
+  volatile bool ppuThreadResetting = false;
+
+  // PPU thread state before halting
+  std::atomic<eThreadState> ppuThreadPreviousState = eThreadState::None;
+
+  // If this is set to a non-zero value, it will halt on that address then clear it
+  u64 ppuHaltOn = 0;
+
+  // If this is set, then the guest requested us to halt. Opens another option in the debugger
+  bool guestHalt = false;
+
+  // Amount of instructions to step
+  u64 ppuStepAmount = 0;
 
   // Execution threads inside this PPU.
-  PPU_STATE *ppuState;
+  std::unique_ptr<PPU_STATE> ppuState;
 
   // Main CPU Context.
   XENON_CONTEXT *xenonContext = nullptr;
 
-  // Amount of CPU ticks per instruction executed.
-  u32 ticksPerInstruction = 0;
+  // Amount of CPU clocls per instruction executed.
+  u32 clocksPerInstruction = 0;
 
+  // Initial reset vector
+  u32 resetVector = 0;
+  
+  //
+  // JIT
+  //
+
+  std::unique_ptr<PPU_JIT> ppuJIT;
+  friend class PPU_JIT;
+  friend bool callEpil(PPU *ppu, PPU_STATE *ppuState);
+
+  //
   // Helpers
-
+  //
+ 
   // Returns the number of instructions per second the current
   // host computer can process.
-  u32 getIPS();
-  // Read next intruction from memory,
-  bool ppuReadNextInstruction();
-  // Check for pending exceptions.
-  void ppuCheckExceptions();
+  u32 GetIPS();
+  // Read next intruction from memory
+  bool PPUReadNextInstruction();
+  // Checks for pending exceptions
+  bool PPUCheckInterrupts();
+  // Checks for pending exceptions
+  bool PPUCheckExceptions();
+  // Checks if it should update the time base
+  void CheckTimeBaseStatus();
   // Updates the current PPU's time base and decrementer based on
   // the amount of ticks per instr we should perform.
-  void updateTimeBase();
+  void UpdateTimeBase();
   // Gets the current running threads.
-  PPU_THREAD getCurrentRunningThreads();
+  u8 GetCurrentRunningThreads();
 };

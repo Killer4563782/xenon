@@ -1,12 +1,12 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
 
+#ifdef _WIN32
 #include <Windows.h>
+#endif
 
-#include "Base/Types.h"
-
-#define POST_BUS_ADDR 0x61010
+#define POST_BUS_ADDR 0x61010ULL
 
 namespace Xe {
 namespace XCPU {

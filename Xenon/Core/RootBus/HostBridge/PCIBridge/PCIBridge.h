@@ -1,26 +1,28 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
+
+#include <cstring>
+#include <unordered_map>
 
 #include "PCIDevice.h"
 
 #include "Core/RootBus/HostBridge/PCIe.h"
 #include "Core/XCPU/IIC/IIC.h"
 
-/*	Dev type			Config Address		BAR
-        PCI Host Bridge		D0008000			E0000000
-        PCI-PCI Bridge		D0000000			EA000000
-        Display Controller	D0010000			EC800000
+/*  Dev type          Config Address    BAR
+    PCI Host Bridge     D0008000      E0000000
+    PCI-PCI Bridge      D0000000      EA000000
+    Display Controller  D0010000      EC800000
 
 */
 
 #define PCI_BRIDGE_BASE_ADDRESS 0xEA000000
 #define PCI_BRIDGE_BASE_SIZE 0xFFF
-#define PCI_BRIDGE_BASE_END_ADDRESS                                            \
-  PCI_BRIDGE_BASE_ADDRESS + PCI_BRIDGE_BASE_SIZE
+#define PCI_BRIDGE_BASE_END_ADDRESS  PCI_BRIDGE_BASE_ADDRESS + PCI_BRIDGE_BASE_SIZE
 
 #define PCI_BRIDGE_CONFIG_SPACE_ADDRESS_BASE 0xD0000000
-#define PCI_BRIDGE_CONFIG_SPACE_SIZE 0xFF // Mandatory 256 bytes of config space
+#define PCI_BRIDGE_CONFIG_SPACE_SIZE 0x1000000 // 16 Mb
 
 #define PCI_BRIDGE_SIZE 0x10000
 
@@ -70,40 +72,46 @@ struct PCI_BRIDGE_STATE {
   PRIO_REG PRIO_REG_OHCI1;
   PRIO_REG PRIO_REG_EHCI0;
   PRIO_REG PRIO_REG_EHCI1;
-  PRIO_REG PRIO_REG_ENET;
   PRIO_REG PRIO_REG_XMA;
   PRIO_REG PRIO_REG_AUDIO;
+  PRIO_REG PRIO_REG_ENET;
+  PRIO_REG PRIO_REG_GRAPHICS;
   PRIO_REG PRIO_REG_SFCX;
 };
 
 class PCIBridge {
 public:
   PCIBridge();
+  ~PCIBridge();
 
   // Checks wheter the current address belongs to the PCI bridge via
   // the BAR's
-  bool isAddressMappedinBAR(u32 address);
+  bool IsAddressMappedinBAR(u32 address);
 
-  void addPCIDevice(PCIDevice *device);
+  void AddPCIDevice(std::shared_ptr<PCIDevice> device);
 
-  bool Read(u64 readAddress, u64 *data, u8 byteCount);
-  bool Write(u64 writeAddress, u64 data, u8 byteCount);
+  void ResetPCIDevice(std::shared_ptr<PCIDevice> device);
 
-  void ConfigRead(u64 readAddress, u64 *data, u8 byteCount);
-  void ConfigWrite(u64 writeAddress, u64 data, u8 byteCount);
+  bool Read(u64 readAddress, u8 *data, u64 size);
+  bool Write(u64 writeAddress, const u8 *data, u64 size);
+  bool MemSet(u64 writeAddress, s32 data, u64 size);
+
+  bool ConfigRead(u64 readAddress, u8 *data, u64 size);
+  bool ConfigWrite(u64 writeAddress, const u8 *data, u64 size);
 
   void RegisterIIC(Xe::XCPU::IIC::XenonIIC *xenonIICPtr);
 
   bool RouteInterrupt(u8 prio);
+  void CancelInterrupt(u8 prio);
 
 private:
-  // IIC Pointer used for interrupts.
+  // IIC Pointer used for interrupts
   Xe::XCPU::IIC::XenonIIC *xenonIIC;
 
-  // Connected device pointers.
-  std::vector<PCIDevice *> connectedPCIDevices;
+  // Connected device pointers
+  std::unordered_map<std::string, std::shared_ptr<PCIDevice>> connectedPCIDevices;
 
-  // Current bridge config.
+  // Current bridge config
   PCI_PCI_BRIDGE_CONFIG_SPACE pciBridgeConfig = {};
   PCI_BRIDGE_STATE pciBridgeState = {};
   u8 pciBridgeConfigSpace[256];

@@ -1,12 +1,20 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
 
+#include <thread>
+#include <fstream>
+#include <filesystem>
+
+#include "Core/RAM/RAM.h"
 #include "Core/RootBus/HostBridge/PCIBridge/PCIBridge.h"
 #include "Core/RootBus/HostBridge/PCIBridge/PCIDevice.h"
 
 // Device Size (at address 0xEA00C000)
 #define SFCX_DEV_SIZE 0x400
+
+namespace Xe {
+namespace PCIDev {
 
 // Device true size is 0xFF, then it just repeats itself.
 
@@ -124,6 +132,16 @@ struct NAND_HEADER {
   u32 smcBootAddr;
 };
 
+// Bootloader Header
+struct BL_HEADER {
+  u8 name[2];
+  u16 buildNumber;
+  u16 pairingData;
+  u16 flags;
+  u32 entryPoint;
+  u32 lenght;
+};
+
 struct SFCX_STATE {
   // Original SFCX Registers
   u32 configReg;
@@ -140,9 +158,11 @@ struct SFCX_STATE {
   // Helpers
   u8 metaType = 0;
   u16 pageSize = 0x200;
-  u8 metaSize = 0x10;
-  u16 pageSizePhys = pageSize + metaSize;
-  u8 pageBuffer[0x210];
+  u32 blockSize = 0x4000;
+  u32 blockSizePhys = 0x4000;
+  u8 spareSize = 0x10;
+  u16 pageSizePhys = static_cast<u16>(pageSize + spareSize);
+  u8 pageBuffer[0x210] = {};
   u16 currentPageBufferPos = 0;
   u8 currentDataReadPos = 0;
 
@@ -150,15 +170,31 @@ struct SFCX_STATE {
   NAND_HEADER nandHeader = {};
 };
 
+// Secure Flash Controller for Xbox Device.
 class SFCX : public PCIDevice {
 public:
-  SFCX(const std::string nandLoadPath, PCIBridge *parentPCIBridge);
-  bool LoadNANDDump(char *nandPath);
-  void Read(u64 readAddress, u64 *data, u8 byteCount) override;
-  void ConfigRead(u64 readAddress, u64 *data, u8 byteCount) override;
-  void Write(u64 writeAddress, u64 data, u8 byteCount) override;
-  void ConfigWrite(u64 writeAddress, u64 data, u8 byteCount) override;
+  SFCX(const std::string &deviceName, u64 size, const std::string &nandLoadPath, u32 cpi,
+    PCIBridge *parentPCIBridge, RAM *ram);
+  ~SFCX();
 
+  // Starts the thread
+  void Start();
+
+  // PCI Read/Write methods to the SFCX device.
+  void Read(u64 readAddress, u8* data, u64 size) override;
+  void Write(u64 writeAddress, const u8* data, u64 size) override;
+  void MemSet(u64 writeAddress, s32 data, u64 size) override;
+
+  // RAW NAND data R/W. Used by Memory-Mapped 1:1 access.
+  void ReadRaw(u64 readAddress, u8* data, u64 size);
+  void WriteRaw(u64 writeAddress, const u8* data, u64 size);
+  void MemSetRaw(u64 writeAddress, s32 data, u64 size);
+
+  // Config space read/write.
+  void ConfigRead(u64 readAddress, u8* data, u64 size) override;
+  void ConfigWrite(u64 writeAddress, const u8* data, u64 size) override;
+
+  u64 initSkip1 = 0, initSkip2 = 0;
 private:
   // Secure Flash Controller for Xbox main loop.
   void sfcxMainLoop();
@@ -166,10 +202,31 @@ private:
   bool checkMagic();
   // Thread object
   std::thread sfcxThread;
+  // Thread running
+  volatile bool sfcxThreadRunning = false;
   // SFCX State
-  SFCX_STATE sfcxState;
+  SFCX_STATE sfcxState{};
   // I/O File stream.
-  FILE *nandFile;
+  std::ifstream nandFile;
   // PCI Bridge pointer. Used for Interrupts.
-  PCIBridge *parentBus;
+  PCIBridge *parentBus = nullptr;
+  // Mutex for thread-safe behavior.
+  std::recursive_mutex mutex;
+  // RAM pointer. Used for DMA.
+  RAM *mainMemory = nullptr;
+  // CPI, used for timing
+  u32 cpi = 0;
+  // Read a page from memory to page buffer.
+  void sfcxReadPageFromNAND(bool physical);
+  // Erase NAND Block
+  void sfcxEraseBlock();
+  // Does a DMA operation from NAND to physical memory.
+  void sfcxDoDMAfromNAND();
+  // Does a DMA operation from physical memory to NAND.
+  void sfcxDoDMAtoNAND();
+  // RAW NAND Data from loaded image.
+  std::vector<u8> rawImageData{};
 };
+
+} // namespace PCIDev
+} // namespace Xe

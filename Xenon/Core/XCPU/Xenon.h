@@ -1,4 +1,4 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
 
@@ -16,26 +16,52 @@
 #include "Core/RootBus/RootBus.h"
 #include "Core/XCPU/PPU/PPU.h"
 
+#include <filesystem>
+
 class Xenon {
 public:
-  Xenon(RootBus *inBus, const std::string blPath, eFuses inFuseSet);
+  Xenon(RootBus *inBus, const std::string blPath, const std::string fusesPath);
   ~Xenon();
 
   void Start(u64 resetVector = 0x100);
+
+  u32 RunCPITests(u64 resetVector = 0x100);
+
+  void LoadElf(const std::string path);
+
+  void Reset();
+
+  void Halt(u64 haltOn = 0, bool requestedByGuest = false, u8 ppuId = 0, ePPUThread threadId = ePPUThread_Zero);
+
+  void Continue();
+
+  void ContinueFromException();
+
+  void Step(int amount = 1);
+
+  bool IsHalted();
+
+  bool IsHaltedByGuest();
+
   Xe::XCPU::IIC::XenonIIC *GetIICPointer() { return &xenonContext.xenonIIC; }
+
+  PPU *GetPPU(u8 ppuID);
+
+  u32 GetCPI() { return sharedCPI; }
 
 private:
   // System Bus
   RootBus *mainBus = nullptr;
 
+  // Global Xenon CPU Content (shared between PPUs)
   XENON_CONTEXT xenonContext = {};
+
+  // The CPI shared across all cores, useful for timing
+  u32 sharedCPI = 0;
 
   // Power Processing Units, the effective execution units inside the XBox
   // 360 CPU.
-  PPU ppu0;
-  PPU ppu1;
-  PPU ppu2;
-  std::thread ppu0Thread;
-  std::thread ppu1Thread;
-  std::thread ppu2Thread;
+  std::unique_ptr<PPU> ppu0{};
+  std::unique_ptr<PPU> ppu1{};
+  std::unique_ptr<PPU> ppu2{};
 };

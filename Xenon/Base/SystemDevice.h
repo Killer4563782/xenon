@@ -1,34 +1,41 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
 
-#include "Types.h"
+#include <string>
 
-struct deviceInfo {
-  const char *deviceName; // Device Name
-  u64 startAddr;          // Start Address
-  u64 endAddr;            // End Address
-  bool socDevice;         // SOC Device
+#include "Base/Types.h"
+
+struct DeviceInfo {
+  std::string deviceName = ""; // Device Name
+  u64 startAddr = 0; // Start Address
+  u64 endAddr = 0; // End Address
+  bool socDevice = false; // SOC Device
 };
 
 class SystemDevice {
 public:
-  void Initialize(const char *deviceName, u64 startAddress, u64 endAddress,
-                  bool isSOCDevice) {
+  SystemDevice(const std::string &deviceName, u64 startAddress, u64 endAddress,
+               bool isSOCDevice)
+  {
     info.deviceName = deviceName;
     info.startAddr = startAddress;
     info.endAddr = endAddress;
     info.socDevice = isSOCDevice;
   }
 
-  virtual void Read(u64 readAddress, u64 *data, u8 byteCount) {}
-  virtual void Write(u64 writeAddress, u64 data, u8 byteCount) {}
+  virtual void Read(u64 readAddress, u8 *data, u64 byteCount) {}
+  virtual void Write(u64 writeAddress, const u8 *data, u64 byteCount) {}
+  virtual void MemSet(u64 writeAddress, s32 data, u64 byteCount) {}
 
-  const char *GetDeviceName() { return info.deviceName; }
+  std::string GetDeviceName() { return info.deviceName; }
   u64 GetStartAddress() { return info.startAddr; }
   u64 GetEndAddress() { return info.endAddr; }
+  u64 GetSize() { return info.startAddr - info.endAddr; }
   bool IsSOCDevice() { return info.socDevice; }
-
+  
+  void UpdateEndAddress(u64 addr) { info.endAddr = addr; }
+  void UpdateStartAddress(u64 addr) { info.startAddr = addr; }
 private:
-  deviceInfo info;
+  DeviceInfo info{};
 };

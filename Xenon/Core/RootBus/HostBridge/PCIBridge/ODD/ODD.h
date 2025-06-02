@@ -1,15 +1,30 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
 
+#ifdef _WIN32
 #include <Windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#endif
+#include <cstring>
+#include <memory>
+#include <string>
+#include <thread>
 
 #include "Core/RAM/RAM.h"
 #include "Core/RootBus/HostBridge/PCIBridge/SATA.h"
 #include "Core/RootBus/HostBridge/PCIBridge/PCIBridge.h"
 #include "Core/RootBus/HostBridge/PCIBridge/PCIDevice.h"
+#include "Core/XCPU/Interpreter/PPCInternal.h"
 
 #define ODD_DEV_SIZE 0x30
+
+namespace Xe {
+namespace PCIDev {
 
 // Read Capacity Data - returned in Big Endian format
 struct READ_CAPACITY_DATA {
@@ -23,42 +38,43 @@ struct READ_CAPACITY_DATA {
 
 class DataBuffer {
 public:
-  bool Empty(void) { return Pointer >= Size; }
-  u32 Space(void) { return Size - Pointer; }
-  u32 Count(void) { return Pointer; }
-  u8 *Ptr(void) { return Data + Pointer; }
-  void Increment(u32 Inc) { Pointer += Inc; }
-  void ResetPtr(void) { Pointer = 0; }
-  bool Initialize(u32 MaxLength, bool fClear) {
-    if (Data && (MaxLength > Size)) {
-      delete Data;
-      memset(this, 0, sizeof *this);
+  bool empty(void) { return _pointer >= _size; }
+  u32 count(void) { return _size - _pointer; }
+  u32 size(void) { return _pointer; }
+  u8 *get(void) { return _data.get() + _pointer; }
+  void resize(u32 v) { _pointer += v; }
+  void reset(void) { _pointer = 0; }
+  bool init(u32 maxLength, bool clear) {
+    if (_data && (maxLength > _size)) {
+      _data.reset();
+      _size = 0;
+      reset();
     }
-    if (Data == nullptr) {
-      Data = ::new u8[MaxLength];
+    if (!_data) {
+      _data = std::make_unique<STRIP_UNIQUE_ARR(_data)>(maxLength);
     }
-    if (Data) {
-      Size = std::max(Size, MaxLength);
-      Pointer = Size; // Empty()
-      if (fClear)
-        memset(Data, 0, MaxLength);
+    if (_data) {
+      _size = std::max(_size, maxLength);
+      _pointer = _size; // Empty()
+      if (clear)
+        memset(_data.get(), 0, maxLength);
       return true;
     }
     return false;
   }
-
 private:
-  u8 *Data;
-  u32 Size;
-  u32 Pointer;
+  std::unique_ptr<u8[]> _data;
+  u32 _size;
+  u32 _pointer;
 };
 
 //
 // Read Only Storage
 //
+#ifdef _WIN32
 class Storage {
 public:
-  Storage(std::string Filename) {
+  Storage(const std::string Filename) {
     hFile = CreateFileA(Filename.data(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   }
@@ -69,7 +85,7 @@ public:
     hFile = INVALID_HANDLE_VALUE;
   }
 
-  u32 Size(void) {
+  u32 Size() {
     u32 cb;
     cb = GetFileSize(hFile, nullptr);
     return (cb == INVALID_FILE_SIZE) ? 0 : cb;
@@ -79,8 +95,6 @@ public:
     DWORD cbRead;
     OVERLAPPED Over;
 
-#define HIDW(qw) (((u64)(qw)) >> 32)
-#define LODW(qw) ((u32)(qw))
     memset(&Over, 0, sizeof Over);
     Over.Offset = LODW(Offset);
     Over.OffsetHigh = HIDW(Offset);
@@ -91,6 +105,36 @@ public:
 private:
   HANDLE hFile;
 };
+#else
+class Storage {
+public:
+  Storage(const std::string Filename) {
+    fd = open(Filename.c_str(), O_RDONLY);
+  }
+  ~Storage() {
+    if (fd != -1)
+      close(fd);
+    fd = -1;
+  }
+
+  u32 Size() {
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+      return 0;
+    return static_cast<u32>(st.st_size);
+  }
+
+  bool Read(u64 Offset, u8* Destination, u32 cu8s) {
+    if (lseek(fd, Offset, SEEK_SET) == (off_t)-1)
+      return false;
+    ssize_t bytesRead = read(fd, Destination, cu8s);
+    return bytesRead == static_cast<ssize_t>(cu8s);
+  }
+
+private:
+  int fd;
+};
+#endif
 
 //
 // SCSI Inquiry Data Structure
@@ -98,29 +142,46 @@ private:
 
 union inquiryDataByte0 {
   u8 dataHex;
+#ifdef __LITTLE_ENDIAN__
   struct {
     u8 peripheralDevType : 5;
     u8 peripheralQualifier : 3;
   };
+#else
+  struct {
+    u8 peripheralQualifier : 3;
+    u8 peripheralDevType : 5;
+  };
+#endif
 };
 union inquiryDataByte1 {
   u8 dataHex;
+#ifdef __LITTLE_ENDIAN__
   struct {
     u8 res : 7;
     u8 rmb : 1;
   };
+#else
+  struct {
+    u8 rmb : 1;
+    u8 res : 7;
+  };
+#endif
 };
 union inquiryDataByte3 {
   u8 dataHex;
+#ifdef __LITTLE_ENDIAN__
   struct {
     u8 responseDataFormat : 4;
     u8 hisup : 1;
     u8 normaca : 1;
     u8 obs : 2;
   };
+#endif
 };
 union inquiryDataByte5 {
   u8 dataHex;
+#ifdef __LITTLE_ENDIAN__
   struct {
     u8 protect : 1;
     u8 res : 2;
@@ -129,9 +190,20 @@ union inquiryDataByte5 {
     u8 acc : 1;
     u8 sccs : 1;
   };
+#else
+  struct {
+    u8 sccs : 1;
+    u8 acc : 1;
+    u8 tpgs : 2;
+    u8 threePc : 1;
+    u8 res : 2;
+    u8 protect : 1;
+  };
+#endif
 };
 union inquiryDataByte6 {
   u8 dataHex;
+#ifdef __LITTLE_ENDIAN__
   struct {
     u8 re0 : 1;
     u8 obs0 : 3;
@@ -140,9 +212,20 @@ union inquiryDataByte6 {
     u8 encserv : 1;
     u8 ob1 : 1;
   };
+#else
+  struct {
+    u8 ob1 : 1;
+    u8 encserv : 1;
+    u8 vs : 1;
+    u8 multip : 1;
+    u8 obs0 : 3;
+    u8 re0 : 1;
+  };
+#endif
 };
 union inquiryDataByte7 {
   u8 dataHex;
+#ifdef __LITTLE_ENDIAN__
   struct {
     u8 vs : 1;
     u8 cmdque : 1;
@@ -150,6 +233,15 @@ union inquiryDataByte7 {
     u8 res : 2;
     u8 obs1 : 2;
   };
+#else
+  struct {
+    u8 obs1 : 2;
+    u8 res : 2;
+    u8 obs0 : 2;
+    u8 cmdque : 1;
+    u8 vs : 1;
+  };
+#endif
 };
 
 // XeLL only reads the first 36 bytes.
@@ -172,11 +264,11 @@ struct XE_ATAPI_INQUIRY_DATA {
 //
 
 union XE_CDB {
-
   //
   // Generic 6-Byte CDB
   //
 
+#ifdef __LITTLE_ENDIAN__
   struct _CDB6GENERIC {
     u8 OperationCode;
     u8 Immediate : 1;
@@ -188,11 +280,24 @@ union XE_CDB {
     u8 Reserved : 4;
     u8 VendorUnique : 2;
   } CDB6GENERIC, *PCDB6GENERIC;
-
+#else
+  struct _CDB6GENERIC {
+    u8 VendorUnique : 2;
+    u8 Reserved : 4;
+    u8 Flag : 1;
+    u8 Link : 1;
+    u8 CommandUniqueBytes[3];
+    u8 LogicalUnitNumber : 3;
+    u8 CommandUniqueBits : 4;
+    u8 Immediate : 1;
+    u8 OperationCode;
+  } CDB6GENERIC, *PCDB6GENERIC;
+#endif
   //
   // Standard 10-byte CDB
   //
 
+#ifdef __LITTLE_ENDIAN__
   struct _CDB10 {
     u8 OperationCode;
     u8 RelativeAddress : 1;
@@ -219,11 +324,40 @@ union XE_CDB {
     };
     u8 Control;
   } CDB10, *PCDB10;
+#else
+  struct _CDB10 {
+    u8 Control;
+    union {
+      struct {
+        u8 TransferBlocksMsb;
+        u8 TransferBlocksLsb;
+      };
+      u16 TransferBlocks;
+    };
+    u8 Reserved2;
+    union {
+      struct {
+        u8 LogicalBlockByte0;
+        u8 LogicalBlockByte1;
+        u8 LogicalBlockByte2;
+        u8 LogicalBlockByte3;
+      };
+      u32 LogicalBlock;
+    };
+    u8 LogicalUnitNumber : 3;
+    u8 DisablePageOut : 1;
+    u8 ForceUnitAccess : 1;
+    u8 Reserved1 : 2;
+    u8 RelativeAddress : 1;
+    u8 OperationCode;
+  } CDB10, *PCDB10;
+#endif
 
   //
   // Standard 12-byte CDB
   //
 
+#ifdef __LITTLE_ENDIAN__
   struct _CDB12 {
     u8 OperationCode;
     u8 RelativeAddress : 1;
@@ -236,6 +370,20 @@ union XE_CDB {
     u8 Reserved2;
     u8 Control;
   } CDB12, *PCDB12;
+#else
+  struct _CDB12 {
+    u8 Control;
+    u8 Reserved2;
+    u8 TransferLength[4]; // [0]=MSB, [3]=LSB
+    u8 LogicalBlock[4];   // [0]=MSB, [3]=LSB
+    u8 LogicalUnitNumber : 3;
+    u8 DisablePageOut : 1;
+    u8 ForceUnitAccess : 1;
+    u8 Reserved1 : 2;
+    u8 RelativeAddress : 1;
+    u8 OperationCode;
+  } CDB12, *PCDB12;
+#endif
 
   u32 AsUlong[4];
   u8 AsByte[16];
@@ -301,6 +449,14 @@ struct XE_ATAPI_REGISTERS {
     // When written
     u32 devControlReg;
   };
+  // Offset 0x10
+  u32 unk_10;
+  // Offset 0x14
+  u32 unk_14;
+  // Offset 0x18
+  u32 signatureReg;
+  // Offset 0x1C
+  u32 unk_1C;
 
   /* Control Block */
   // Offset 0x0
@@ -322,24 +478,27 @@ struct XE_ATAPI_DEV_STATE {
   // Data Write Buffer
   DataBuffer dataWriteBuffer;
   // ATAPI Inquiry Data
-  XE_ATAPI_INQUIRY_DATA atapiInquiryData = {0};
+  XE_ATAPI_INQUIRY_DATA atapiInquiryData = {};
   // ATA Identify structure.
   XE_ATA_IDENTIFY_DATA atapiIdentifyData = {0};
   // SCSI Command Descriptor Block
-  XE_CDB scsiCBD = {0};
+  XE_CDB scsiCBD = {};
   // Direct Memroy Access Processing
-  XE_ATAPI_DMA_STATE dmaState = {0};
+  XE_ATAPI_DMA_STATE dmaState = {};
   // Mounted ISO Image
-  Storage *mountedCDImage;
+  std::unique_ptr<Storage> mountedCDImage{};
 };
 
 class ODD : public PCIDevice {
 public:
-  ODD(PCIBridge *parentPCIBridge, RAM *ram);
-  void Read(u64 readAddress, u64 *data, u8 u8Count) override;
-  void ConfigRead(u64 readAddress, u64 *data, u8 u8Count) override;
-  void Write(u64 writeAddress, u64 data, u8 u8Count) override;
-  void ConfigWrite(u64 writeAddress, u64 data, u8 u8Count) override;
+  ODD(const char* deviceName, u64 size,
+    PCIBridge *parentPCIBridge, RAM *ram);
+  
+  void Read(u64 readAddress, u8 *data, u64 size) override;
+  void Write(u64 writeAddress, const u8 *data, u64 size) override;
+  void MemSet(u64 writeAddress, s32 data, u64 size) override;
+  void ConfigRead(u64 readAddress, u8* data, u64 size) override;
+  void ConfigWrite(u64 writeAddress, const u8* data, u64 size) override;
 
 private:
   // PCI Bridge pointer. Used for Interrupts.
@@ -349,7 +508,7 @@ private:
   RAM *mainMemory;
 
   // ATAPI Device State.
-  XE_ATAPI_DEV_STATE atapiState = {0};
+  XE_ATAPI_DEV_STATE atapiState = {};
 
   // SCSI Command Processing
   void processSCSICommand();
@@ -361,3 +520,6 @@ private:
   void atapiIdentifyPacketDeviceCommand();
   void atapiIdentifyCommand();
 };
+
+} // namespace PCIDev
+} // namespace Xe

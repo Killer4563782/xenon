@@ -1,9 +1,16 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
 
 namespace Base {
 
-constexpr char VERSION[] = "Experimental v0.0.1";
+const std::string Version = "Experimental " APP_VERSION
+#ifdef COMMIT_COUNT
+"-" COMMIT_COUNT
+#endif
+#ifdef BRANCH
+" - " BRANCH
+#endif
+;
 
-}
+} // namespace Base

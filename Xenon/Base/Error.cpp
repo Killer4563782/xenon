@@ -1,4 +1,4 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #include "Error.h"
 
@@ -8,46 +8,47 @@
 #include <cerrno>
 #include <cstring>
 #endif
+#include <fmt/format.h>
 
 namespace Base {
 
-std::string NativeErrorToString(int e) {
+std::string NativeErrorToString(const s32 e) {
 #ifdef _WIN32
-    LPSTR err_str;
+  char *errString = nullptr;
 
-    DWORD res = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                                   FORMAT_MESSAGE_IGNORE_INSERTS,
-                               nullptr, e, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
-                               reinterpret_cast<LPSTR>(&err_str), 1, nullptr);
-    if (!res) {
-        return "(FormatMessageA failed to format error)";
-    }
-    std::string ret(err_str);
-    LocalFree(err_str);
-    return ret;
+  ul32 res = ::FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                             FORMAT_MESSAGE_IGNORE_INSERTS,
+                             nullptr, e, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
+                             reinterpret_cast<char*>(&errString), 1, nullptr);
+  if (!res) {
+    return fmt::format("Error code: {} (0x{:X})", e, e);
+  }
+  std::string ret{ errString };
+  ::LocalFree(errString);
+  return ret;
 #else
-    char err_str[255];
+  char errString[255] = {};
 #if defined(__GLIBC__) && (_GNU_SOURCE || (_POSIX_C_SOURCE < 200112L && _XOPEN_SOURCE < 600)) ||   \
-    defined(ANDROID)
-    // Thread safe (GNU-specific)
-    const char* str = strerror_r(e, err_str, sizeof(err_str));
-    return std::string(str);
+  defined(ANDROID)
+  // Thread safe (GNU-specific)
+  const char *str = ::strerror_r(e, errString, sizeof(errString));
+  return str;
 #else
-    // Thread safe (XSI-compliant)
-    int second_err = strerror_r(e, err_str, sizeof(err_str));
-    if (second_err != 0) {
-        return "(strerror_r failed to format error)";
-    }
-    return std::string(err_str);
+  // Thread safe (XSI-compliant)
+  s32 secondErr = ::strerror_r(e, errString, sizeof(errString));
+  if (secondErr != 0) {
+    return fmt::format("Error code: {} (0x{:X})", e, e);
+  }
+  return errString;
 #endif // GLIBC etc.
 #endif // _WIN32
 }
 
 std::string GetLastErrorMsg() {
 #ifdef _WIN32
-    return NativeErrorToString(GetLastError());
+  return NativeErrorToString(::GetLastError());
 #else
-    return NativeErrorToString(errno);
+  return NativeErrorToString(errno);
 #endif
 }
 

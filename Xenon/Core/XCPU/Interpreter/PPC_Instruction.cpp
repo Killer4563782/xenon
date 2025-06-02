@@ -1,329 +1,98 @@
-/*
-* Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
+/*
 * All original authors of the rpcs3 PPU_Decoder and PPU_Opcodes maintain their original copyright.
 * Modifed for usage in the Xenon Emulator
 * All rights reserved
 * License: GPL2
 */
 
-#include "PPC_Instruction.h"
+#include "Base/Global.h"
+#include "Core/XCPU/Xenon.h"
 
+#include "PPC_Instruction.h"
 #include "PPCInterpreter.h"
 
-#define D_STUB(name) void PPCInterpreter_##name(PPU_STATE *hCore) { return PPCInterpreter_known_unimplemented(#name, hCore); }
-#define D_STUBRC(name) void PPCInterpreter_##name##x(PPU_STATE *hCore) { return PPCInterpreter_known_unimplemented(#name "x", hCore); } 
-
 namespace PPCInterpreter {
-  void PPCInterpreter_nop(PPU_STATE *hCore) {
+  void PPCInterpreter_nop(PPU_STATE *ppuState) {
     // Do nothing
   }
-  void PPCInterpreter_invalid(PPU_STATE *hCore) {
-    PPU_THREAD_REGISTERS& thread =
-      hCore->ppuThread[hCore->currentThread];
 
-    std::string name =
-      legacy_GetOpcodeName(thread.CI.opcode);
+  void PPCInterpreter_invalid(PPU_STATE *ppuState) {
+    if (Config::debug.haltOnInvalidInstructions) {
+      XeMain::GetCPU()->Halt();
+      Config::imgui.debugWindow = true; // Open debugger on bad fault
+    }
 
-    LOG_CRITICAL(Xenon, "PPC Interpreter: {} found: data: {:#x}, address: {:#x}",
-      name.data(),
-      thread.CI.opcode,
-      thread.CIA);
+    LOG_CRITICAL(Xenon, "PPC Interpreter: Invalid instruction found! Data: 0x{:X} (opcode, value[s]), address: 0x{:X}",
+      _instr.opcode,
+      curThread.CIA);
   }
 
-  void PPCInterpreter_known_unimplemented(const char *name, PPU_STATE *hCore) {
-    PPU_THREAD_REGISTERS& thread =
-      hCore->ppuThread[hCore->currentThread];
-
-    LOG_CRITICAL(Xenon, "PPC Interpreter: {} is not implemented! data: {:#x}, address: {:#x}",
+  void PPCInterpreter_known_unimplemented(const char *name, PPU_STATE *ppuState) {
+    LOG_CRITICAL(Xenon, "PPC Interpreter: {} is not implemented! Data: 0x{:X}, address: 0x{:X}",
       name,
-      thread.CI.opcode,
-      thread.CIA);
+      _instr.opcode,
+      curThread.CIA);
   }
 
-  D_STUBRC(addc);
-  D_STUBRC(addco);
-  D_STUBRC(addo);
-  D_STUBRC(addeo);
-  D_STUBRC(addzeo);
-  D_STUBRC(addme);
-  D_STUBRC(addmeo);
-  D_STUBRC(subfco);
-  D_STUBRC(subfeo);
-  D_STUBRC(subfo);
-  D_STUBRC(subfzeo);
-  D_STUBRC(subfme);
-  D_STUBRC(subfmeo);
-  D_STUBRC(divduo);
-  D_STUBRC(divdo);
-  D_STUBRC(divwo);
-  D_STUBRC(divwuo);
-  D_STUBRC(mulhd);
-  D_STUBRC(mulldo);
-  D_STUBRC(mulhw);
-  D_STUBRC(mullwo);
-  D_STUBRC(nego);
-  D_STUBRC(rldcl);
-  D_STUBRC(mcrfs);
-  D_STUBRC(mtfsb1);
-  D_STUBRC(mtfsb0);
-  D_STUBRC(mtfsfi);
-  D_STUBRC(fadd);
-  D_STUBRC(fsub);
-  D_STUBRC(fctid);
-  D_STUBRC(fctidz);
-  D_STUBRC(fcfid);
-  D_STUBRC(fctiw);
-  D_STUBRC(fctiwz);
-  D_STUBRC(fadds);
-  D_STUBRC(fsubs);
-  D_STUBRC(fdiv);
-  D_STUBRC(fdivs);
-  D_STUBRC(fmr);
-  D_STUBRC(fmadds);
-  D_STUBRC(fmsubs);
-  D_STUBRC(fmul);
-  D_STUBRC(fmuls);
-  D_STUBRC(fnmsub);
-  D_STUBRC(fnmsubs);
-  D_STUBRC(fnmadd);
-  D_STUBRC(fmadd);
-  D_STUBRC(fnmadds);
-  D_STUBRC(fmsub);
-  D_STUBRC(fneg);
-  D_STUBRC(fsel);
-  D_STUBRC(fres);
-  D_STUBRC(frsp);
-  D_STUBRC(fabs);
-  D_STUBRC(fnabs);
-  D_STUBRC(fsqrt);
-  D_STUBRC(fsqrts);
-  D_STUBRC(frsqrte);
-  D_STUBRC(eqv);
-  D_STUB(td);
-  D_STUB(dst);
-  D_STUB(dss);
-  D_STUB(dstst);
-  D_STUB(lfdx);
-  D_STUB(lfdu);
-  D_STUB(lfdux);
-  D_STUB(lfsx);
-  D_STUB(lfsu);
-  D_STUB(lfsux);
-  D_STUB(mfsrin);
-  D_STUB(mfsr);
-  D_STUB(lvsr);
-  D_STUB(lvsl);
-  D_STUB(lvx);
-  D_STUB(lvrx);
-  D_STUB(lvxl);
-  D_STUB(lvrxl);
-  D_STUB(lvlx);
-  D_STUB(lvlxl);
-  D_STUB(lwaux);
-  D_STUB(lswx);
-  D_STUB(lhaux);
-  D_STUB(lvewx);
-  D_STUB(lveb);
-  D_STUB(lvebx);
-  D_STUB(lvehx);
-  D_STUB(stdbrx);
-  D_STUB(stswx);
-  D_STUB(stfdu);
-  D_STUB(stfs);
-  D_STUB(stfdx);
-  D_STUB(stfsx);
-  D_STUB(stfsu);
-  D_STUB(stfsux);
-  D_STUB(stfdux);
-  D_STUB(stfiwx);
-  D_STUB(stvebx);
-  D_STUB(fcmpo);
-  D_STUB(fcmpu);
-  D_STUB(stvx);
-  D_STUB(stvxl);
-  D_STUB(stvrx);
-  D_STUB(stvlx);
-  D_STUB(stvrxl);
-  D_STUB(stvlxl);
-  D_STUB(stvehx);
-  D_STUB(stvewx);
-  D_STUB(eciwx);
-  D_STUB(ecowx);
-  D_STUB(slbmfev);
-  D_STUB(slbmfee);
-
-  // Vector-instructions
-  D_STUB(vaddubm);
-  D_STUB(vmaxub);
-  D_STUB(vrlb);
-  D_STUB(vcmpequb);
-  D_STUB(vcmpequb_);
-  D_STUB(vmuloub);
-  D_STUB(vaddfp);
-  D_STUB(vmrghb);
-  D_STUB(vpkuhum);
-
-  D_STUB(vmhaddshs);
-  D_STUB(vmhraddshs);
-  D_STUB(vmladduhm);
-  D_STUB(vmsumubm);
-  D_STUB(vmsummbm);
-  D_STUB(vmsumuhm);
-  D_STUB(vmsumuhs);
-  D_STUB(vmsumshm);
-  D_STUB(vmsumshs);
-  D_STUB(vsel);
-  D_STUB(vperm);
-  D_STUB(vsldoi);
-  D_STUB(vmaddfp);
-  D_STUB(vnmsubfp);
-
-  D_STUB(vadduhm);
-  D_STUB(vmaxuh);
-  D_STUB(vrlh);
-  D_STUB(vcmpequh);
-  D_STUB(vcmpequh_);
-  D_STUB(vmulouh);
-  D_STUB(vsubfp);
-  D_STUB(vmrghh);
-  D_STUB(vpkuwum);
-  D_STUB(vadduwm);
-  D_STUB(vmaxuw);
-  D_STUB(vrlw);
-  D_STUB(vcmpequw);
-  D_STUB(vcmpequw_);
-  D_STUB(vmrghw);
-  D_STUB(vpkuhus);
-  D_STUB(vcmpeqfp);
-  D_STUB(vcmpeqfp_);
-  D_STUB(vpkuwus);
-
-  D_STUB(vmaxsb);
-  D_STUB(vslb);
-  D_STUB(vmulosb);
-  D_STUB(vrefp);
-  D_STUB(vmrglb);
-  D_STUB(vpkshus);
-  D_STUB(vmaxsh);
-  D_STUB(vslh);
-  D_STUB(vmulosh);
-  D_STUB(vrsqrtefp);
-  D_STUB(vmrglh);
-  D_STUB(vpkswus);
-  D_STUB(vaddcuw);
-  D_STUB(vmaxsw);
-  D_STUB(vslw);
-  D_STUB(vexptefp);
-  D_STUB(vmrglw);
-  D_STUB(vpkshss);
-  D_STUB(vsl);
-  D_STUB(vcmpgefp);
-  D_STUB(vcmpgefp_);
-  D_STUB(vlogefp);
-  D_STUB(vpkswss);
-  D_STUB(vaddubs);
-  D_STUB(vminub);
-  D_STUB(vsrb);
-  D_STUB(vcmpgtub);
-  D_STUB(vcmpgtub_);
-  D_STUB(vmuleub);
-  D_STUB(vrfin);
-  D_STUB(vspltb);
-  D_STUB(vupkhsb);
-  D_STUB(vadduhs);
-  D_STUB(vminuh);
-  D_STUB(vsrh);
-  D_STUB(vcmpgtuh);
-  D_STUB(vcmpgtuh_);
-  D_STUB(vmuleuh);
-  D_STUB(vrfiz);
-  D_STUB(vsplth);
-  D_STUB(vupkhsh);
-  D_STUB(vadduws);
-  D_STUB(vminuw);
-  D_STUB(vsrw);
-  D_STUB(vcmpgtuw);
-  D_STUB(vcmpgtuw_);
-  D_STUB(vrfip);
-  D_STUB(vspltw);
-  D_STUB(vupklsb);
-  D_STUB(vsr);
-  D_STUB(vcmpgtfp);
-  D_STUB(vcmpgtfp_);
-  D_STUB(vrfim);
-  D_STUB(vupklsh);
-  D_STUB(vaddsbs);
-  D_STUB(vminsb);
-  D_STUB(vsrab);
-  D_STUB(vcmpgtsb);
-  D_STUB(vcmpgtsb_);
-  D_STUB(vmulesb);
-  D_STUB(vcfux);
-  D_STUB(vspltisb);
-  D_STUB(vpkpx);
-  D_STUB(vaddshs);
-  D_STUB(vminsh);
-  D_STUB(vsrah);
-  D_STUB(vcmpgtsh);
-  D_STUB(vcmpgtsh_);
-  D_STUB(vmulesh);
-  D_STUB(vcfsx);
-  D_STUB(vspltish);
-  D_STUB(vupkhpx);
-  D_STUB(vaddsws);
-  D_STUB(vminsw);
-  D_STUB(vsraw);
-  D_STUB(vcmpgtsw);
-  D_STUB(vcmpgtsw_);
-  D_STUB(vctuxs);
-  D_STUB(vspltisw);
-  D_STUB(vcmpbfp);
-  D_STUB(vcmpbfp_);
-  D_STUB(vctsxs);
-  D_STUB(vupklpx);
-  D_STUB(vsububm);
-  D_STUB(vavgub);
-  D_STUB(vand);
-  D_STUB(vmaxfp);
-  D_STUB(vslo);
-  D_STUB(vsubuhm);
-  D_STUB(vavguh);
-  D_STUB(vandc);
-  D_STUB(vminfp);
-  D_STUB(vsro);
-  D_STUB(vsubuwm);
-  D_STUB(vavguw);
-  D_STUB(vor);
-  D_STUB(vxor);
-  D_STUB(vavgsb);
-  D_STUB(vnor);
-  D_STUB(vavgsh);
-  D_STUB(vsubcuw);
-  D_STUB(vavgsw);
-  D_STUB(vsububs);
-  D_STUB(mfvscr);
-  D_STUB(vsum4ubs);
-  D_STUB(vsubuhs);
-  D_STUB(mtvscr);
-  D_STUB(vsum4shs);
-  D_STUB(vsubuws);
-  D_STUB(vsum2sws);
-  D_STUB(vsubsbs);
-  D_STUB(vsum4sbs);
-  D_STUB(vsubshs);
-  D_STUB(vsubsws);
-  D_STUB(vsumsws);
+  void PPCInterpreterJIT_invalid(PPU_STATE *ppuState, JITBlockBuilder *b, PPCOpcode instr) {
+    u32 opcodeEntry = PPCDecode(instr.opcode);
+    std::string opName = ppcDecoder.getNameTable()[opcodeEntry];
+    LOG_DEBUG(Xenon, "JIT: No emitter found for opcode '{}' (0x{:08X}) at addr 0x{:X}", opName, instr.opcode, curThread.CIA);
+  }
 
   PPCDecoder::PPCDecoder() {
-  	#define GET_(name) &PPCInterpreter_##name
-  	#define GET(name) GET_(name), GET_(name)
-    #define GETRC(name) GET_(name##x), GET_(name##x)
-  	for (auto& x : table) {
+    fillTables();
+    fillNameTables();
+    fillJITTables();
+  }
+
+  void PPCDecoder::fillJITTables() {
+#undef GET_
+#undef GET
+#undef GETRC
+#define GET_(name) &PPCInterpreterJIT_##name
+#define GET(name) GET_(name), GET_(name)
+#define GETRC(name) GET_(name##x), GET_(name##x)
+
+    for (auto &x : jitTable) {
       x = GET(invalid);
-  	}
-  	// Main opcodes (field 0..5)
-  	fillTable(0x00, 6, -1, {
+    }
+
+    // Main opcodes (field 0..5)
+#if defined(ARCH_X86) || defined(ARCH_X86_64)
+    fillTable<instructionHandlerJIT>(jitTable, 0x00, 6, -1, {
+      { 0x0E, GET(addi) },
+      { 0x12, GET(b) },
+      { 0x15, GETRC(rlwinm) },
+      { 0x17, GETRC(rlwnm) },
+      { 0x18, GET(ori) },
+      { 0x19, GET(oris) },
+      { 0x1A, GET(xori) },
+      { 0x1B, GET(xoris) },
+      { 0x1C, GET(andi) },
+    });
+
+    // Group 0x1F opcodes (field 21..30)
+    fillTable<instructionHandlerJIT>(jitTable, 0x1F, 10, 1, {
+      { 0x153, GET(mfspr) },
+    });
+#endif // defined ARCH_X86 || ARCH_X86_64
+
+    #undef GET_
+    #undef GET
+    #undef GETRC
+  }
+  void PPCDecoder::fillTables() {
+    #define GET_(name) &PPCInterpreter_##name
+    #define GET(name) GET_(name), GET_(name)
+    #define GETRC(name) GET_(name##x), GET_(name##x)
+    for (auto& x : table) {
+      x = GET(invalid);
+    }
+    // Main opcodes (field 0..5)
+    fillTable<instructionHandler>(table, 0x00, 6, -1, {
       { 0x02, GET(tdi) },
       { 0x03, GET(twi) },
       { 0x07, GET(mulli) },
@@ -370,172 +139,196 @@ namespace PPCInterpreter {
       { 0x35, GET(stfsu) },
       { 0x36, GET(stfd) },
       { 0x37, GET(stfdu) },
-  	});
-  	// Group 0x04 opcodes (field 21..31)
-  	fillTable(0x04, 11, 0, {
-      { 0x0, GET(vaddubm) },
-      { 0x2, GET(vmaxub) },
-      { 0x4, GET(vrlb) },
-      { 0x006, GET(vcmpequb) },
-      { 0x406, GET(vcmpequb_) },
-      { 0x8, GET(vmuloub) },
-      { 0xA, GET(vaddfp) },
-      { 0xC, GET(vmrghb) },
-      { 0xE, GET(vpkuhum) },
-
-      { 0x20, GET(vmhaddshs), 5 },
-      { 0x21, GET(vmhraddshs), 5 },
-      { 0x22, GET(vmladduhm), 5 },
-      { 0x24, GET(vmsumubm), 5 },
-      { 0x25, GET(vmsummbm), 5 },
-      { 0x26, GET(vmsumuhm), 5 },
-      { 0x27, GET(vmsumuhs), 5 },
-      { 0x28, GET(vmsumshm), 5 },
-      { 0x29, GET(vmsumshs), 5 },
-      { 0x2A, GET(vsel), 5 },
-      { 0x2B, GET(vperm), 5 },
-      { 0x2C, GET(vsldoi), 5 },
-      { 0x2E, GET(vmaddfp), 5 },
-      { 0x2F, GET(vnmsubfp), 5 },
-
-      { 0x40, GET(vadduhm) },
-      { 0x42, GET(vmaxuh) },
-      { 0x44, GET(vrlh) },
-      { 0x046, GET(vcmpequh) },
-      { 0x446, GET(vcmpequh_) },
-      { 0x48, GET(vmulouh) },
-      { 0x4A, GET(vsubfp) },
-      { 0x4C, GET(vmrghh) },
-      { 0x4E, GET(vpkuwum) },
-      { 0x80, GET(vadduwm) },
-      { 0x82, GET(vmaxuw) },
-      { 0x84, GET(vrlw) },
-      { 0x086, GET(vcmpequw) },
-      { 0x486, GET(vcmpequw_) },
-      { 0x8C, GET(vmrghw) },
-      { 0x8E, GET(vpkuhus) },
-      { 0x0C6, GET(vcmpeqfp) },
-      { 0x4C6, GET(vcmpeqfp_) },
-      { 0xCE, GET(vpkuwus) },
-
-      { 0x102, GET(vmaxsb) },
-      { 0x104, GET(vslb) },
-      { 0x108, GET(vmulosb) },
-      { 0x10A, GET(vrefp) },
-      { 0x10C, GET(vmrglb) },
-      { 0x10E, GET(vpkshus) },
-      { 0x142, GET(vmaxsh) },
-      { 0x144, GET(vslh) },
-      { 0x148, GET(vmulosh) },
-      { 0x14A, GET(vrsqrtefp) },
-      { 0x14C, GET(vmrglh) },
-      { 0x14E, GET(vpkswus) },
-      { 0x180, GET(vaddcuw) },
-      { 0x182, GET(vmaxsw) },
-      { 0x184, GET(vslw) },
-      { 0x18A, GET(vexptefp) },
-      { 0x18C, GET(vmrglw) },
-      { 0x18E, GET(vpkshss) },
-      { 0x1C4, GET(vsl) },
-      { 0x1C6, GET(vcmpgefp) },
-      { 0x5C6, GET(vcmpgefp_) },
-      { 0x1CA, GET(vlogefp) },
-      { 0x1CE, GET(vpkswss) },
-      { 0x200, GET(vaddubs) },
-      { 0x202, GET(vminub) },
-      { 0x204, GET(vsrb) },
-      { 0x206, GET(vcmpgtub) },
-      { 0x606, GET(vcmpgtub_) },
-      { 0x208, GET(vmuleub) },
-      { 0x20A, GET(vrfin) },
-      { 0x20C, GET(vspltb) },
-      { 0x20E, GET(vupkhsb) },
-      { 0x240, GET(vadduhs) },
-      { 0x242, GET(vminuh) },
-      { 0x244, GET(vsrh) },
-      { 0x246, GET(vcmpgtuh) },
-      { 0x646, GET(vcmpgtuh_) },
-      { 0x248, GET(vmuleuh) },
-      { 0x24A, GET(vrfiz) },
-      { 0x24C, GET(vsplth) },
-      { 0x24E, GET(vupkhsh) },
-      { 0x280, GET(vadduws) },
-      { 0x282, GET(vminuw) },
-      { 0x284, GET(vsrw) },
-      { 0x286, GET(vcmpgtuw) },
-      { 0x686, GET(vcmpgtuw_) },
-      { 0x28A, GET(vrfip) },
-      { 0x28C, GET(vspltw) },
-      { 0x28E, GET(vupklsb) },
-      { 0x2C4, GET(vsr) },
-      { 0x2C6, GET(vcmpgtfp) },
-      { 0x6C6, GET(vcmpgtfp_) },
-      { 0x2CA, GET(vrfim) },
-      { 0x2CE, GET(vupklsh) },
-      { 0x300, GET(vaddsbs) },
-      { 0x302, GET(vminsb) },
-      { 0x304, GET(vsrab) },
-      { 0x306, GET(vcmpgtsb) },
-      { 0x706, GET(vcmpgtsb_) },
-      { 0x308, GET(vmulesb) },
-      { 0x30A, GET(vcfux) },
-      { 0x30C, GET(vspltisb) },
-      { 0x30E, GET(vpkpx) },
-      { 0x340, GET(vaddshs) },
-      { 0x342, GET(vminsh) },
-      { 0x344, GET(vsrah) },
-      { 0x346, GET(vcmpgtsh) },
-      { 0x746, GET(vcmpgtsh_) },
-      { 0x348, GET(vmulesh) },
-      { 0x34A, GET(vcfsx) },
-      { 0x34C, GET(vspltish) },
-      { 0x34E, GET(vupkhpx) },
-      { 0x380, GET(vaddsws) },
-      { 0x382, GET(vminsw) },
-      { 0x384, GET(vsraw) },
-      { 0x386, GET(vcmpgtsw) },
-      { 0x786, GET(vcmpgtsw_) },
-      { 0x38A, GET(vctuxs) },
-      { 0x38C, GET(vspltisw) },
-      { 0x3C6, GET(vcmpbfp) },
-      { 0x7C6, GET(vcmpbfp_) },
-      { 0x3CA, GET(vctsxs) },
-      { 0x3CE, GET(vupklpx) },
-      { 0x400, GET(vsububm) },
-      { 0x402, GET(vavgub) },
-      { 0x404, GET(vand) },
-      { 0x40A, GET(vmaxfp) },
-      { 0x40C, GET(vslo) },
-      { 0x440, GET(vsubuhm) },
-      { 0x442, GET(vavguh) },
-      { 0x444, GET(vandc) },
-      { 0x44A, GET(vminfp) },
-      { 0x44C, GET(vsro) },
-      { 0x480, GET(vsubuwm) },
-      { 0x482, GET(vavguw) },
-      { 0x484, GET(vor) },
-      { 0x4C4, GET(vxor) },
-      { 0x502, GET(vavgsb) },
-      { 0x504, GET(vnor) },
-      { 0x542, GET(vavgsh) },
-      { 0x580, GET(vsubcuw) },
-      { 0x582, GET(vavgsw) },
-      { 0x600, GET(vsububs) },
+    });
+    // Special case opcodes
+    fillTable<instructionHandler>(table, 0x04, 11, 12, {
+      //{ 0x083, GET(lvewx128) },
+      //{ 0x403, GET(lvlx128) },
+      //{ 0x603, GET(lvlxl128) },
+      //{ 0x443, GET(lvrx128) },
+      //{ 0x643, GET(lvrxl128) },
+      //{ 0x003, GET(lvsl128) },
+      //{ 0x043, GET(lvsr128) },
+      //{ 0x2C3, GET(lvxl128) },
+      { 0x945, GET(vperm128) },
+      { 0x7193, GET(stvewx128) },
+      { 0x7393, GET(stvrx128) },
+      { 0x73C4, GET(stvx128) },
+      { 0xB705, GET(vor128) },
+      { 0x30C4, GET(lvx128) },
+      { 0x2405, GET(vmulfp128) },
+      { 0x1D8C6, GET(vmrglw128) },
+      { 0x1C8C6, GET(vmrghw128) },
+      { 0x1C1C4, GET(stvlxl128) },
+      { 0x1C2C4, GET(stvlxl128) },
+      { 0x1C406, GET(vrlimi128) },
+      { 0x1DD06, GET(vspltisw128) },
+      { 0xDB84, GET(vmaddfp) },
+      { 0xBB84, GET(vmaddfp) },
+      { 0x7B84, GET(vmaddfp) },
+      { 0xCB84, GET(vmaddfp) },
+      { 0xCB04, GET(vsldoi) },
+      { 0x4B04, GET(vsldoi) },
+      { 0xF406, GET(vpermwi128) },
+      { 0x6AC4, GET(vperm) },
+      { 0x5AC4, GET(vperm) },
+      { 0x141C4, GET(stvlx128) },
+      { 0x151C4, GET(stvrx128) },
+      //{ 0x503, GET(stvlx128) },
+      //{ 0x743, GET(stvrxl128) },
+      //{ 0x3C3, GET(stvxl128) },
+    });
+    // Group 0x4 opcodes (field 21..31)
+    fillTable<instructionHandler>(table, 0x04, 11, 0, {
       { 0x604, GET(mfvscr) },
-      { 0x608, GET(vsum4ubs) },
-      { 0x640, GET(vsubuhs) },
       { 0x644, GET(mtvscr) },
-      { 0x648, GET(vsum4shs) },
-      { 0x680, GET(vsubuws) },
-      { 0x688, GET(vsum2sws) },
+      { 0x180, GET(vaddcuw) },
+      { 0x00A, GET(vaddfp) },
+      { 0x300, GET(vaddsbs) },
+      { 0x340, GET(vaddshs) },
+      { 0x380, GET(vaddsws) },
+      { 0x000, GET(vaddubm) },
+      { 0x200, GET(vaddubs) },
+      { 0x040, GET(vadduhm) },
+      { 0x240, GET(vadduhs) },
+      { 0x080, GET(vadduwm) },
+      { 0x280, GET(vadduws) },
+      { 0x404, GET(vand) },
+      { 0x444, GET(vandc) },
+      { 0x502, GET(vavgsb) },
+      { 0x542, GET(vavgsh) },
+      { 0x582, GET(vavgsw) },
+      { 0x402, GET(vavgub) },
+      { 0x442, GET(vavguh) },
+      { 0x482, GET(vavguw) },
+      { 0x34A, GET(vcfsx) },
+      { 0x30A, GET(vcfux) },
+      { 0x3C6, GET(vcmpbfp) },
+      { 0x0C6, GET(vcmpeqfp) },
+      { 0x006, GET(vcmpequb) },
+      { 0x046, GET(vcmpequh) },
+      { 0x086, GET(vcmpequw) },
+      { 0x1C6, GET(vcmpgefp) },
+      { 0x2C6, GET(vcmpgtfp) },
+      { 0x3C6, GET(vcmpgtsb) },
+      { 0x346, GET(vcmpgtsh) },
+      { 0x386, GET(vcmpgtsw) },
+      { 0x206, GET(vcmpgtub) },
+      { 0x246, GET(vcmpgtuh) },
+      { 0x286, GET(vcmpgtuw) },
+      { 0x3CA, GET(vctsxs) },
+      { 0x38A, GET(vctuxs) },
+      { 0x18A, GET(vexptefp) },
+      { 0x1CA, GET(vlogefp) },
+      { 0x02E, GET(vmaddfp) },
+      { 0x40A, GET(vmaxfp) },
+      { 0x102, GET(vmaxsb) },
+      { 0x142, GET(vmaxsh) },
+      { 0x182, GET(vmaxsw) },
+      { 0x002, GET(vmaxub) },
+      { 0x042, GET(vmaxuh) },
+      { 0x082, GET(vmaxuw) },
+      { 0x020, GET(vmhaddshs) },
+      { 0x021, GET(vmhraddshs) },
+      { 0x44A, GET(vminfp) },
+      { 0x302, GET(vminsb) },
+      { 0x342, GET(vminsh) },
+      { 0x382, GET(vminsw) },
+      { 0x202, GET(vminub) },
+      { 0x242, GET(vminuh) },
+      { 0x282, GET(vminuw) },
+      { 0x222, GET(vmladduhm) },
+      { 0x00C, GET(vmrghb) },
+      { 0x04C, GET(vmrghh) },
+      { 0x08C, GET(vmrghw) },
+      { 0x10C, GET(vmrglb) },
+      { 0x14C, GET(vmrglh) },
+      { 0x18C, GET(vmrglw) },
+      { 0x025, GET(vmsummbm) },
+      { 0x028, GET(vmsumshm) },
+      { 0x029, GET(vmsumshs) },
+      { 0x024, GET(vmsumubm) },
+      { 0x026, GET(vmsumuhm) },
+      { 0x027, GET(vmsumuhs) },
+      { 0x308, GET(vmulesb) },
+      { 0x348, GET(vmulesh) },
+      { 0x208, GET(vmuleub) },
+      { 0x248, GET(vmuleuh) },
+      { 0x108, GET(vmulosb) },
+      { 0x148, GET(vmulosh) },
+      { 0x008, GET(vmuloub) },
+      { 0x048, GET(vmulouh) },
+      { 0x02F, GET(vnmsubfp) },
+      { 0x504, GET(vnor) },
+      { 0x484, GET(vor) },
+      { 0x02B, GET(vperm) },
+      { 0x30E, GET(vpkpx) },
+      { 0x18E, GET(vpkshss) },
+      { 0x10E, GET(vpkshus) },
+      { 0x1CE, GET(vpkswss) },
+      { 0x14E, GET(vpkswus) },
+      { 0x00E, GET(vpkuhum) },
+      { 0x08E, GET(vpkuhus) },
+      { 0x04E, GET(vpkuwum) },
+      { 0x0CE, GET(vpkuwus) },
+      { 0x10A, GET(vrefp) },
+      { 0x2CA, GET(vrfim) },
+      { 0x20A, GET(vrfin) },
+      { 0x28A, GET(vrfip) },
+      { 0x24A, GET(vrfiz) },
+      { 0x004, GET(vrlb) },
+      { 0x044, GET(vrlh) },
+      { 0x084, GET(vrlw) },
+      { 0x14A, GET(vrsqrtefp) },
+      { 0x02A, GET(vsel) },
+      { 0x1C4, GET(vsl) },
+      { 0x104, GET(vslb) },
+      { 0x02C, GET(vsldoi) },
+      { 0x010, GET(vsldoi128) },
+      { 0x144, GET(vslh) },
+      { 0x40C, GET(vslo) },
+      { 0x184, GET(vslw) },
+      { 0x20C, GET(vspltb) },
+      { 0x24C, GET(vsplth) },
+      { 0x30C, GET(vspltisb) },
+      { 0x34C, GET(vspltish) },
+      { 0x38C, GET(vspltisw) },
+      { 0x28C, GET(vspltw) },
+      { 0x24C, GET(vsr) },
+      { 0x304, GET(vsrab) },
+      { 0x344, GET(vsrah) },
+      { 0x384, GET(vsraw) },
+      { 0x204, GET(vsrb) },
+      { 0x244, GET(vsrh) },
+      { 0x44C, GET(vsro) },
+      { 0x284, GET(vsrw) },
+      { 0x580, GET(vsubcuw) },
+      { 0x04A, GET(vsubfp) },
       { 0x700, GET(vsubsbs) },
-      { 0x708, GET(vsum4sbs) },
       { 0x740, GET(vsubshs) },
       { 0x780, GET(vsubsws) },
+      { 0x400, GET(vsububm) },
+      { 0x600, GET(vsububs) },
+      { 0x440, GET(vsubuhm) },
+      { 0x640, GET(vsubuhs) },
+      { 0x480, GET(vsubuwm) },
+      { 0x680, GET(vsubuws) },
+      { 0x688, GET(vsum2sws) },
+      { 0x708, GET(vsum4sbs) },
+      { 0x648, GET(vsum4shs) },
+      { 0x608, GET(vsum4ubs) },
       { 0x788, GET(vsumsws) },
-  	});
-  	// Group 0x13 opcodes (field 21..30)
-  	fillTable(0x13, 10, 1, {
+      { 0x34E, GET(vupkhpx) },
+      { 0x20E, GET(vupkhsb) },
+      { 0x24E, GET(vupkhsh) },
+      { 0x3CE, GET(vupklpx) },
+      { 0x28E, GET(vupklsb) },
+      { 0x28E, GET(vupklsb) },
+      { 0x2CE, GET(vupklsh) },
+      { 0x4C4, GET(vxor) },
+    });
+    // Group 0x13 opcodes (field 21..30)
+    fillTable<instructionHandler>(table, 0x13, 10, 1, {
       { 0x000, GET(mcrf) },
       { 0x010, GET(bclr) },
       { 0x012, GET(rfid) },
@@ -549,9 +342,9 @@ namespace PPCInterpreter {
       { 0x1A1, GET(crorc) },
       { 0x1C1, GET(cror) },
       { 0x210, GET(bcctr) },
-  	});
-  	// Group 0x1E opcodes (field 27..30)
-  	fillTable(0x1E, 4, 1, {
+    });
+    // Group 0x1E opcodes (field 27..30)
+    fillTable<instructionHandler>(table, 0x1E, 4, 1, {
       { 0x0, GETRC(rldicl) },
       { 0x1, GETRC(rldicl) },
       { 0x2, GETRC(rldicr) },
@@ -562,9 +355,9 @@ namespace PPCInterpreter {
       { 0x7, GETRC(rldimi) },
       { 0x8, GETRC(rldcl) },
       { 0x9, GETRC(rldcr) },
-  	});
-  	// Group 0x1F opcodes (field 21..30)
-  	fillTable(0x1F, 10, 1, {
+    });
+    // Group 0x1F opcodes (field 21..30)
+    fillTable<instructionHandler>(table, 0x1F, 10, 1, {
       { 0x000, GET(cmp) },
       { 0x004, GET(tw) },
       { 0x006, GET(lvsl) },
@@ -724,15 +517,15 @@ namespace PPCInterpreter {
       { 0x3DA, GETRC(extsw) },
       { 0x3D6, GET(icbi) },
       { 0x3F6, GET(dcbz) },
-  	});
-  	// Group 0x3A opcodes (field 30..31)
-  	fillTable(0x3A,2, 0, {
+    });
+    // Group 0x3A opcodes (field 30..31)
+    fillTable<instructionHandler>(table, 0x3A, 2, 0, {
       { 0x0, GET(ld) },
       { 0x1, GET(ldu) },
       { 0x2, GET(lwa) },
-  	});
-  	// Group 0x3B opcodes (field 21..30)
-  	fillTable(0x3B, 10, 1, {
+    });
+    // Group 0x3B opcodes (field 21..30)
+    fillTable<instructionHandler>(table, 0x3B, 10, 1, {
       { 0x12, GETRC(fdivs), 5 },
       { 0x14, GETRC(fsubs), 5 },
       { 0x15, GETRC(fadds), 5 },
@@ -743,16 +536,16 @@ namespace PPCInterpreter {
       { 0x1D, GETRC(fmadds), 5 },
       { 0x1E, GETRC(fnmsubs), 5 },
       { 0x1F, GETRC(fnmadds), 5 },
-  	});
-  	// Group 0x3E opcodes (field 30..31)
-  	fillTable(0x3E, 2, 0, {
+    });
+    // Group 0x3E opcodes (field 30..31)
+    fillTable<instructionHandler>(table, 0x3E, 2, 0, {
       { 0x0, GET(std) },
       { 0x1, GET(stdu) },
-  	});
-  	// Group 0x3F opcodes (field 21..30)
-  	fillTable(0x3F, 10, 1, {
+    });
+    // Group 0x3F opcodes (field 21..30)
+    fillTable<instructionHandler>(table, 0x3F, 10, 1, {
       { 0x026, GETRC(mtfsb1) },
-      { 0x040, GETRC(mcrfs) },
+      { 0x040, GET(mcrfs) },
       { 0x046, GETRC(mtfsb0) },
       { 0x086, GETRC(mtfsfi) },
       { 0x247, GETRC(mffs) },
@@ -783,580 +576,174 @@ namespace PPCInterpreter {
       { 0x32E, GETRC(fctid) },
       { 0x32F, GETRC(fctidz) },
       { 0x34E, GETRC(fcfid) },
-  	});
-  }	
-  std::string legacy_GetOpcodeName(u32 instrData) {
-    u32 OPCD = ExtractBits(instrData, 0, 5);
+    });
+    #undef GET_
+    #undef GET
+    #undef GETRC
+  }
 
-    u32 XO_20to30 = ExtractBits(instrData, 20, 30);
-    u32 XO_27to29 = ExtractBits(instrData, 27, 29);
-    u32 XO_27to30 = ExtractBits(instrData, 27, 30);
-    u32 XO_21to30 = ExtractBits(instrData, 21, 30);
-    u32 XO_22to30 = ExtractBits(instrData, 22, 30);
-    u32 XO_21to29 = ExtractBits(instrData, 21, 29);
-    u32 XO_30to31 = ExtractBits(instrData, 30, 31);
+  constexpr std::pair<const char*, char> getBCInfo(u32 bo, u32 bi) {
+    std::pair<const char*, char> info{};
 
-    switch (OPCD) {
-    case 2: // tdi
-      return "tdi";
-      break;
-    case 3: // twi
-      return "twi";
-      break;
-    case 7: // mulli
-      return "mulli";
-      break;
-    case 8: // subfic
-      return "subfic";
-      break;
-    case 10: // cmpli
-      return "cmpli";
-      break;
-    case 11: // cmpi
-      return "cmpi";
-      break;
-    case 12: // addic
-      return "addic";
-      break;
-    case 13: // addic.
-      return "addicx";
-      break;
-    case 14: // addi
-      return "addi";
-      break;
-    case 15: // addis
-      return "addis";
-      break;
-    case 16: // bcx
-      return "bcx";
-      break;
-    case 17: // sc
-      return "sc";
-      break;
-    case 18: // bx
-      return "bx";
-      break;
-    case 19: /* Subgroup 19 */
-      switch (XO_20to30) {
-      case 0: // mcrf
-        return "mcrf";
-        break;
-      case 16: // bclrx
-        return "bclrx";
-        break;
-      case 18: // rfid
-        return "rfid";
-        break;
-      case 33: // crnor
-        return "crnor";
-        break;
-      case 129: // crandc
-        return "crandc";
-        break;
-      case 150: // isync
-        return "isync";
-        break;
-      case 193: // crxor
-        return "crxor";
-        break;
-      case 225: // crnand
-        return "crnand";
-        break;
-      case 257: // crand
-        return "crand";
-        break;
-      case 289: // creqv
-        return "creqv";
-        break;
-      case 417: // crorc
-        return "crorc";
-        break;
-      case 449: // cror
-        return "cror";
-        break;
-      case 528: // bcctrx
-        return "bcctrx";
-        break;
-      }
-      return "Unknown instruction";
-      break;
-    case 20: // rlwimix
-      return "rlwimix";
-      break;
-    case 21: // rlwinmx
-      return "rlwinmx";
-      break;
-    case 23: // rlwnmx
-      return "rlwnmx";
-      break;
-    case 24: // ori
-      return "ori";
-      break;
-    case 25: // oris
-      return "oris";
-      break;
-    case 26: // xori
-      return "xori";
-      break;
-    case 27: // xoris
-      return "xoris";
-      break;
-    case 28: // andi.
-      return "andix";
-      break;
-    case 29: // andis.
-      return "andisx";
-      break;
-    case 30: /* Subgroup 30 */
-      switch (XO_27to29) {
-      case 0: // rldiclx
-        return "rldiclx";
-        break;
-      case 1: // rldicrx
-        return "rldicrx";
-        break;
-      case 2: // rldicx
-        return "rldicx";
-        break;
-      case 3: // rldimix
-        return "rldimix";
-        break;
-      }
-      switch (XO_27to30) {
-      case 8: // rldclx
-        return "rldclx";
-        break;
-      case 9: // rldcrx
-        return "rldcrx";
-        break;
-      }
-      return "Unknown instruction";
-      break;
-    case 31: /* Subgroup 31 */
-      switch (XO_21to30) {
-      case 0: // cmp
-        return "cmp";
-        break;
-      case 4: // tw
-        return "tw";
-        break;
-      case 19: // mfcr
-        return "mfcr";
-        break;
-      case 20: // lwarx
-        return "lwarx";
-        break;
-      case 21: // ldx
-        return "ldx";
-        break;
-      case 23: // lwzx
-        return "lwzx";
-        break;
-      case 24: // slwx
-        return "slwx";
-        break;
-      case 26: // cntlzwx
-        return "cntlzwx";
-        break;
-      case 27: // sldx
-        return "sldx";
-        break;
-      case 28: // andx
-        return "andx";
-        break;
-      case 32: // cmpl
-        return "cmpl";
-        break;
-      case 53: // ldux
-        return "ldux";
-        break;
-      case 54: // dcbst
-        return "dcbst";
-        break;
-      case 55: // lwzux
-        return "lwzux";
-        break;
-      case 58: // cntlzdx
-        return "cntlzdx";
-        break;
-      case 60: // andcx
-        return "andcx";
-        break;
-      case 68: // td
-        return "td";
-        break;
-      case 83: // mfmsr
-        return "mfmsr";
-        break;
-      case 84: // ldarx
-        return "ldarx";
-        break;
-      case 86: // dcbf
-        return "dcbf";
-        break;
-      case 87: // lbzx
-        return "lbzx";
-        break;
-      case 119: // lbzux
-        return "lbzux";
-        break;
-      case 124: // norx
-        return "norx";
-        break;
-      case 144: // mtcrf
-        return "mtcrf";
-        break;
-      case 146: // mtmsr
-        return "mtmsr";
-        break;
-      case 149: // stdx
-        return "stdx";
-        break;
-      case 150: // stwcx.
-        return "stwcx";
-        break;
-      case 151: // stwx
-        return "stwx";
-        break;
-      case 178: // mtmsrd
-        return "mtmsrd";
-        break;
-      case 181: // stdux
-        return "stdux";
-        break;
-      case 183: // stwux
-        return "stwux";
-        break;
-      case 210: // mtsr
-        return "mtsr";
-        break;
-      case 214: // stdcx.
-        return "stdcx";
-        break;
-      case 215: // stbx
-        return "stbx";
-        break;
-      case 242: // mtsrin
-        return "mtsrin";
-        break;
-      case 247: // stbux
-        return "stbux";
-        break;
-      case 246: // dcbt
-        return "dcbt";
-        break;
-      case 278: // dcbt
-        return "dcbt";
-        break;
-      case 279: // lhzx
-        return "lhzx";
-        break;
-      case 284: // eqvx
-        return "eqvx";
-        break;
-      case 274: // tlbiel
-        return "tlbiel";
-        break;
-      case 306: // tlbie
-        return "tlbie";
-        break;
-      case 310: // eciwx
-        return "eciwx";
-        break;
-      case 311: // lhzux
-        return "lhzux";
-        break;
-      case 316: // xorx
-        return "xorx";
-        break;
-      case 339: // mfspr
-        return "mfspr";
-        break;
-      case 341: // lwax
-        return "lwax";
-        break;
-      case 343: // lhax
-        return "lhax";
-        break;
-      case 370: // tlbia
-        return "tlbia";
-        break;
-      case 371: // mftb
-        return "mftb";
-        break;
-      case 373: // lwaux
-        return "lwaux";
-        break;
-      case 375: // lhaux
-        return "lhaux";
-        break;
-      case 407: // sthx
-        return "sthx";
-        break;
-      case 412: // orcx
-        return "orcx";
-        break;
-      case 434: // slbie
-        return "slbie";
-        break;
-      case 438: // ecowx
-        return "ecowx";
-        break;
-      case 439: // sthux
-        return "sthux";
-        break;
-      case 444: // orx
-        return "orx";
-        break;
-      case 467: // mtspr
-        return "mtspr";
-        break;
-      case 476: // nandx
-        return "nandx";
-        break;
-      case 498: // slbia
-        return "slbia";
-        break;
-      case 533: // lswx
-        return "lswx";
-        break;
-      case 534: // lwbrx
-        return "lwbrx";
-        break;
-      case 535: // lfsx
-        return "lfsx";
-        break;
-      case 536: // srwx
-        return "srwx";
-        break;
-      case 539: // srdx
-        return "srdx";
-        break;
-      case 566: // tlbsync
-        return "tlbsync";
-        break;
-      case 567: // lfsux
-        return "lfsux";
-        break;
-      case 595: // mfsr
-        return "mfsr";
-        break;
-      case 597: // lswi
-        return "lswi";
-        break;
-      case 598: // sync
-        return "sync";
-        break;
-      case 599: // lfdx
-        return "lfdx";
-        break;
-      case 631: // lfdux
-        return "lfdux";
-        break;
-      case 569: // mfsrin
-        return "mfsrin";
-        break;
-      case 915: // slbmfee
-        return "slbmfee";
-        break;
-      case 851: // slbmfev
-        return "slbmfev";
-        break;
-      case 402: // slbmte
-        return "slbmte";
-        break;
-      case 661: // stswx
-        return "stswx";
-        break;
-      case 662: // stwbrx
-        return "stwbrx";
-        break;
-      case 663: // stfsx
-        return "stfsx";
-        break;
-      case 695: // stfsux
-        return "stfsux";
-        break;
-      case 725: // stswi
-        return "stswi";
-        break;
-      case 727: // stfdx
-        return "stfdx";
-        break;
-      case 759: // stfdux
-        return "stfdux";
-        break;
-      case 790: // lhbrx
-        return "lhbrx";
-        break;
-      case 762: // srawx
-        return "srawx";
-        break;
-      case 794: // sradx
-        return "sradx";
-        break;
-      case 824: // srawix
-        return "srawix";
-        break;
-      case 854: // eieio
-        return "eieio";
-        break;
-      case 918: // sthbrx
-        return "sthbrx";
-        break;
-      case 922: // extshx
-        return "extshx";
-        break;
-      case 954: // extsbx
-        return "extsbx";
-        break;
-      case 982: // icbi
-        return "icbi";
-        break;
-      case 983: // stfiwx
-        return "stfiwx";
-        break;
-      case 986: // extswx
-        return "extswx";
-        break;
-      case 1014: // dcbz
-        return "dcbz";
-        break;
-      }
-      switch (XO_22to30) {
-      case 8: // subfcx
-        return "subfcx";
-        break;
-      case 9: // mulhdux
-        return "mulhdux";
-        break;
-      case 10: // addcx
-        return "addcx";
-        break;
-      case 11: // mulhwux
-        return "mulhwux";
-        break;
-      case 40: // subfx
-        return "subfx";
-        break;
-      case 73: // mulhdx
-        return "mulhdx";
-        break;
-      case 75: // mulhwx
-        return "mulhwx";
-        break;
-      case 104: // negx
-        return "negx";
-        break;
-      case 136: // subfex
-        return "subfex";
-        break;
-      case 138: // addex
-        return "addex";
-        break;
-      case 200: // subfzex
-        return "subfzex";
-        break;
-      case 202: // addzex
-        return "addzex";
-        break;
-      case 232: // subfmex
-        return "subfmex";
-        break;
-      case 233: // mulldx
-        return "mulldx";
-        break;
-      case 234: // addmex
-        return "addmex";
-        break;
-      case 235: // mullwx
-        return "mullwx";
-        break;
-      case 266: // addx
-        return "addx";
-        break;
-      case 457: // divdux
-        return "divdux";
-        break;
-      case 459: // divwux
-        return "divwux";
-        break;
-      case 489: // divdx
-        return "divdx";
-        break;
-      case 491: // divwx
-        return "divwx";
-        break;
-      }
-      switch (XO_21to29) {
-      case 413: // sradix
-        return "sradix";
-        break;
-      }
-      return "Unknown instruction";
-      break;
-    case 32: // lwz
-      return "lwz";
-      break;
-    case 33: // lwzu
-      return "lwzu";
-      break;
-    case 34: // lbz
-      return "lbz";
-      break;
-    case 35: // lbzu
-      return "lbzu";
-      break;
-    case 36: // stw
-      return "stw";
-      break;
-    case 37: // stwu
-      return "stwu";
-      break;
-    case 38: // stb
-      return "stb";
-      break;
-    case 39: // stbu
-      return "stbu";
-      break;
-    case 40: // lhz
-      return "lhz";
-      break;
-    case 41: // lhzu
-      return "lhzu";
-      break;
-    case 44: // sth
-      return "sth";
-      break;
-    case 48: // lfs
-      return "lfs";
-      break;
-    case 58:
-      switch (XO_30to31) {
-      case 0: // ld
-        return "ld";
-        break;
-      case 1: // ldu
-        return "ldu";
-        break;
-      default:
-        return "Unknown instruction";
-        break;
-      }
-    case 62:
-      switch (XO_30to31) {
-      case 0: // std
-        return "std";
-        break;
-      case 1: // stdu
-        return "stdu";
-        break;
-      default:
-        return "Unknown instruction";
-        break;
-      }
-    default:
-      return "Unknown instruction";
-      break;
+    // handle bd(n)z(f|t) and bd(n)z
+    switch (bo) {
+      case 0b00000:
+      case 0b00001: return { "bdnzf", 'f' };
+      case 0b00010:
+      case 0b00011: return { "bdzf", 'f' };
+      case 0b01000:
+      case 0b01001: return { "bdnzt", 't' };
+      case 0b01010:
+      case 0b01011: return { "bdzt", 't' };
+      case 0b10010: return { "bdz", '\0' };
+      case 0b11010: return { "bdz", '-' };
+      case 0b11011: return { "bdz", '+' };
+      case 0b10000: return { "bdnz", '\0' };
+      case 0b11000: return { "bdnz", '-' };
+      case 0b11001: return { "bdnz", '+' };
     }
-  }}
+
+    const bool isMinus = (bo & 0b11) == 0b10;
+    const bool isPlus  = (bo & 0b11) == 0b11;
+
+    if ((bo & 0b11100) == 0b00100) {
+      // bge/ble/bne/bns
+      if (isMinus) info.second = '-';
+      else if (isPlus) info.second = '+';
+
+      switch (bi % 4) {
+        case 0x0: info.first = "bge"; break;
+        case 0x1: info.first = "ble"; break;
+        case 0x2: info.first = "bne"; break;
+        case 0x3: info.first = "bns"; break;
+      }
+      return info;
+    }
+
+    if ((bo & 0b11100) == 0b01100) {
+      // blt/bgt/beq/bso
+      if (isMinus) info.second = '-';
+      else if (isPlus) info.second = '+';
+
+      switch (bi % 4) {
+        case 0x0: info.first = "blt"; break;
+        case 0x1: info.first = "bgt"; break;
+        case 0x2: info.first = "beq"; break;
+        case 0x3: info.first = "bso"; break;
+      }
+      return info;
+    }
+
+    return info; // default: empty pair
+  }
+
+  const std::string PPCInterpreter_getFullName(u32 instr) {
+    if (instr == 0x60000000) {
+      return "nop";
+    }
+
+    PPCOpcode op;
+    op.opcode = instr;
+    u32 decodedInstr = PPCDecode(instr);
+    std::string baseName = ppcDecoder.getNameTable()[decodedInstr];
+
+    switch (Base::JoaatStringHash(baseName)) {
+    case "cmpi"_j: {
+      return op.l10 ? "cmpdi" : "cmpwi";
+    } break;
+    case "addic"_j: {
+      return op.main & 1 ? "addic." : "addic";
+    } break;
+    case "addi"_j: {
+      return op.ra == 0 ? "li" : "addi";
+    } break;
+    case "addis"_j: {
+      return op.ra == 0 ? "lis" : "addis";
+    } break;
+    case "bc"_j: {
+      const u32 bo = op.bo;
+      const u32 bi = op.bi;
+      const s32 bd = op.ds * 4;
+      const u32 aa = op.aa;
+      const u32 lk = op.lk;
+
+      const auto [inst, sign] = getBCInfo(bo, bi);
+      if (!inst) {
+        return "bc";
+      }
+
+      std::string finalInstr = inst;
+      if (lk)
+        finalInstr += 'l';
+      if (aa)
+        finalInstr += 'a';
+      if (sign)
+        finalInstr += sign;
+      return finalInstr;
+    } break;
+    case "b"_j: {
+      const u32 li = op.bt24;
+      const u32 aa = op.aa;
+      const u32 lk = op.lk;
+
+      switch (lk) {
+      case 0: {
+        switch (aa) {
+          case 0: return "b";
+          case 1: return "ba";
+        }
+      } break;
+      case 1: {
+        switch (aa) {
+          case 0: return "bl";
+          case 1: return "bla";
+        }
+      } break;
+      }
+    } break;
+    case "bclr"_j: {
+      const u32 bo = op.bo;
+      const u32 bi = op.bi;
+      const u32 bh = op.bh;
+      const u32 lk = op.lk;
+
+      if (bo == 0b10100) {
+        return lk ? "blrl" : "blr";
+      }
+
+      const auto [inst, sign] = getBCInfo(bo, bi);
+      if (!inst) {
+        return "bclr";
+      }
+
+      std::string finalInstr = std::string(inst) + (lk ? "lrl" : "lr");
+      if (sign)
+        finalInstr += sign;
+      return finalInstr;
+    } break;
+    case "bcctr"_j: {
+      const u32 bo = op.bo;
+      const u32 bi = op.bi;
+      const u32 bh = op.bh;
+      const u32 lk = op.lk;
+
+      if (bo == 0b10100) {
+        return lk ? "bctrl" : "bctr";
+      }
+
+      const auto [inst, sign] = getBCInfo(bo, bi);
+      if (!inst || inst[1] == 'd') {
+        return "bcctr";
+      }
+
+      std::string finalInstr = std::string(inst) + (lk ? "lrl" : "lr");
+      finalInstr += lk ? "ctrl" : "ctr";
+      if (sign)
+        finalInstr += sign;
+      return finalInstr;
+    } break;
+    }
+
+    return baseName;
+  }
+}

@@ -1,19 +1,22 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
 
 // Dumped from address 0xD0010000. First 265 bytes.
 // GPU Version (first 4 bytes of this data) and revision (last byte from the 3rd
 // word of data) alongside the PCI Version and rev are important. Software
-// determines console type based on them. Corona
+// determines console type based on them.
+// Corona:
 // * GPU Version: 0x5841
 // * GPU Revision: 0x00
-// Jasper
+// Jasper:
 // * GPU Version: 0x5831
 // * GPU Revision: 0x11
 
-const u32 xgpuConfigMap[64] = {
-    0x58311414, 0x00100002, 0x03800011, 0x00000000, 0xec800000, 0xffffffff,
+#define XGPU_DEVICE_BASE 0xEC800000
+
+static constexpr u32 xgpuConfigMap[64] = {
+    0x58311414, 0x00100002, 0x03800011, 0x00000000, XGPU_DEVICE_BASE, 0xffffffff,
     0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0x00000000,
     0xffffffff, 0x00000050, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
     0xffffffff, 0x00000000, 0x06020001, 0x00000000, 0xffffffff, 0x00000000,
@@ -23,4 +26,5 @@ const u32 xgpuConfigMap[64] = {
     0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0x00000000,
     0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
     0xffffffff, 0x0000c421, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
-    0xffffffff, 0xffffffff, 0xffffffff, 0x00000000};
+    0xffffffff, 0xffffffff, 0xffffffff, 0x00000000
+};

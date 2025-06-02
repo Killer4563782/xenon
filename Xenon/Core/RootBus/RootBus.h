@@ -1,6 +1,8 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
+
+#include <unordered_map>
 
 #include "Base/SystemDevice.h"
 #include "Core/RootBus/HostBridge/HostBridge.h"
@@ -11,23 +13,27 @@
 
 class RootBus {
 public:
-  void Init();
+  RootBus();
+  ~RootBus();
 
-  void AddHostBridge(HostBridge *newHostBridge);
+  void AddHostBridge(std::shared_ptr<HostBridge> newHostBridge);
 
-  void AddDevice(SystemDevice *device);
+  void AddDevice(std::shared_ptr<SystemDevice> device);
 
-  void Read(u64 readAddress, u64 *data, u8 byteCount);
-  void Write(u64 writeAddress, u64 data, u8 byteCount);
+  void ResetDevice(std::shared_ptr<SystemDevice> device);
+
+  bool Read(u64 readAddress, u8 *data, u64 size, bool soc = false);
+  bool Write(u64 writeAddress, const u8 *data, u64 size, bool soc = false);
+  bool MemSet(u64 writeAddress, s32 data, u64 size);
 
   // Configuration Space R/W
-  void ConfigRead(u64 readAddress, u64 *data, u8 byteCount);
-  void ConfigWrite(u64 writeAddress, u64 data, u8 byteCount);
+  bool ConfigRead(u64 readAddress, u8 *data, u64 size);
+  bool ConfigWrite(u64 writeAddress, const u8 *data, u64 size);
 
 private:
-  HostBridge *hostBridge;
+  std::shared_ptr<HostBridge> hostBridge{};
   u32 deviceCount;
-  std::vector<SystemDevice *> conectedDevices;
+  std::unordered_map<std::string, std::shared_ptr<SystemDevice>> connectedDevices;
 
-  u8 *biuData = new u8[0x10000];
+  std::unique_ptr<u8> biuData{ std::make_unique<STRIP_UNIQUE(biuData)>(0x10000) };
 };

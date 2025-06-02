@@ -1,193 +1,178 @@
-# Copyright 2025 Xenon Emulator Project
+# Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 cmake_minimum_required(VERSION 3.22)
 
+set(CMAKE_C_STANDARD 17)
 set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_C_STANDARD_REQUIRED TRUE)
+set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
 if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
+  set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Set compiler ID
+if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+  set(msvc TRUE)
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  set(gcc TRUE)
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set(clang TRUE)
+endif()
+
+# Optimizations
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+if (msvc)
+  add_compile_options($<$<CONFIG:Release>:/Oi>)
+  add_compile_options($<$<CONFIG:Release>:/Ot>)
+elseif (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+  add_link_options(-O3)
+endif()
 
 project(Xenon)
 
-# This function should be passed a list of all files in a target. It will automatically generate file groups
-# following the directory hierarchy, so that the layout of the files in IDEs matches the one in the filesystem.
-function(create_target_directory_groups target_name)
-    # Place any files that aren't in the source list in a separate group so that they don't get in the way.
-    source_group("Other Files" REGULAR_EXPRESSION ".")
-    get_target_property(target_sources "${target_name}" SOURCES)
-    foreach(file_name IN LISTS target_sources)
-        get_filename_component(dir_name "${file_name}" PATH)
-        # Group names use '\' as a separator even though the entire rest of CMake uses '/'...
-        string(REPLACE "/" "\\" group_name "${dir_name}")
-        source_group("${group_name}" FILES "${file_name}")
-    endforeach()
-endfunction()
+# Options
+option(GFX_ENABLED "Enable graphics" ON)
 
-find_package(fmt 11.1.3 CONFIG)
-find_package(SDL3 3.2.4 CONFIG)
-find_package(toml11 4.3.0 CONFIG)
+# Set Version
+set(EMULATOR_VERSION_MAJOR "0")
+set(EMULATOR_VERSION_MINOR "0")
+set(EMULATOR_VERSION_PATCH "1")
 
-add_subdirectory(third_party)
+set_source_files_properties(Xenon/Xenon.rc PROPERTIES COMPILE_DEFINITIONS "EMULATOR_VERSION_MAJOR=${EMULATOR_VERSION_MAJOR};EMULATOR_VERSION_MINOR=${EMULATOR_VERSION_MINOR};EMULATOR_VERSION_PATCH=${EMULATOR_VERSION_PATCH}")
+add_compile_definitions(APP_VERSION="${EMULATOR_VERSION_MAJOR}.${EMULATOR_VERSION_MINOR}.${EMULATOR_VERSION_PATCH}")
 
-set(Logging
-    Xenon/Base/Logging/Backend.cpp
-    Xenon/Base/Logging/Backend.h
-    Xenon/Base/Logging/Filter.cpp
-    Xenon/Base/Logging/Filter.h
-    Xenon/Base/Logging/Formatter.h
-    Xenon/Base/Logging/Log.h
-    Xenon/Base/Logging/Log_entry.h
-    Xenon/Base/Logging/Text_formatter.cpp
-    Xenon/Base/Logging/Text_formatter.h
-    Xenon/Base/Logging/Types.h
+# COMMIT_COUNT on Xenon (with Git)
+execute_process(
+  COMMAND git rev-list --count HEAD
+  WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+  OUTPUT_VARIABLE COMMIT_COUNT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-set(Base
-    ${Logging}
-    Xenon/Base/Alignment.h
-    Xenon/Base/Arch.h
-    Xenon/Base/Assert.cpp
-    Xenon/Base/Assert.h
-    Xenon/Base/Bounded_threadsafe_queue.h
-    Xenon/Base/Concepts.h
-    Xenon/Base/Config.cpp
-    Xenon/Base/Config.h
-    Xenon/Base/Error.cpp
-    Xenon/Base/Error.h
-    Xenon/Base/Enum.h
-    Xenon/Base/io_file.cpp
-    Xenon/Base/io_file.h
-    Xenon/Base/ntapi.cpp
-    Xenon/Base/ntapi.h
-    Xenon/Base/Path_util.cpp
-    Xenon/Base/Path_util.h
-    Xenon/Base/Polyfill_thread.h
-    Xenon/Base/String_util.cpp
-    Xenon/Base/String_util.h
-    Xenon/Base/SystemDevice.h
-    Xenon/Base/Thread.cpp
-    Xenon/Base/Thread.h
-    Xenon/Base/Types.h
-    Xenon/Base/Version.h
+# Xenon BRANCH (with Git)
+execute_process(
+  COMMAND git rev-parse --abbrev-ref HEAD
+  WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+  OUTPUT_VARIABLE BRANCH
+  OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-set(NAND
-    Xenon/Core/NAND/NAND.cpp
-    Xenon/Core/NAND/NAND.h
-)
+if (NOT "${COMMIT_COUNT}" STREQUAL "" AND NOT "${BRANCH}" STREQUAL "")
+  add_compile_definitions(COMMIT_COUNT="${COMMIT_COUNT}")
+  if (NOT "${BRANCH}" STREQUAL "main")
+    add_compile_definitions(BRANCH="${BRANCH}")
+    message(STATUS "Title: Xenon Experimental ${EMULATOR_VERSION_MAJOR}.${EMULATOR_VERSION_MINOR}.${EMULATOR_VERSION_PATCH}-${COMMIT_COUNT} - ${BRANCH}")
+  else()
+    message(STATUS "Title: Xenon Experimental ${EMULATOR_VERSION_MAJOR}.${EMULATOR_VERSION_MINOR}.${EMULATOR_VERSION_PATCH}-${COMMIT_COUNT}")
+  endif()
+endif()
 
-set(RAM
-    Xenon/Core/RAM/RAM.cpp
-    Xenon/Core/RAM/RAM.h
-)
+# Make microprofile use a custom config
+add_compile_definitions(MICROPROFILE_USE_CONFIG)
 
-set(RootBus
-    Xenon/Core/RootBus/RootBus.cpp
-    Xenon/Core/RootBus/RootBus.h
-    Xenon/Core/RootBus/HostBridge/HostBridge.cpp
-    Xenon/Core/RootBus/HostBridge/HostBridge.h
-    Xenon/Core/RootBus/HostBridge/PCIe.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/AUDIOCTRLLR/AudioController.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/AUDIOCTRLLR/AudioController.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/EHCI0/EHCI0.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/EHCI0/EHCI0.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/EHCI1/EHCI1.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/EHCI1/EHCI1.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/ETHERNET/Ethernet.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/ETHERNET/Ethernet.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/HDD/HDD.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/HDD/HDD.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/ODD/ODD.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/ODD/ODD.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/OHCI0/OHCI0.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/OHCI0/OHCI0.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/OHCI1/OHCI1.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/OHCI1/OHCI1.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/PCIBridge.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/PCIBridge.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/PCIBridgeConfig.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/PCIDevice.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/SFCX/SFCX.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/SFCX/SFCX.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/SATA.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/SMC/SMC.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/SMC/SMC.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/SMC/HANA_State.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/SMC/SMC_Config.h
-    Xenon/Core/RootBus/HostBridge/PCIBridge/XMA/XMA.cpp
-    Xenon/Core/RootBus/HostBridge/PCIBridge/XMA/XMA.h
-)
+# Enable SSE3
+if (gcc)
+  target_compile_options(Xenon PRIVATE -msse2)
+  target_compile_options(Xenon PRIVATE -mssse3)
+elseif (msvc)
+  target_compile_options(Xenon PRIVATE /arch:SSE2)
+endif()
 
-set(XCPU
-    Xenon/Core/XCPU/Bitfield.h
-    Xenon/Core/XCPU/Xenon.cpp
-    Xenon/Core/XCPU/Xenon.h
-    Xenon/Core/XCPU/XenonReservations.cpp
-    Xenon/Core/XCPU/XenonReservations.h
-    Xenon/Core/XCPU/eFuse.h
-    Xenon/Core/XCPU/IIC/IIC.cpp
-    Xenon/Core/XCPU/IIC/IIC.h
-    Xenon/Core/XCPU/Interpreter/PPC_ALU.cpp
-    Xenon/Core/XCPU/Interpreter/PPC_FPU.cpp
-    Xenon/Core/XCPU/Interpreter/Interpreter_Helpers.cpp
-    Xenon/Core/XCPU/Interpreter/PPC_MMU.cpp
-    Xenon/Core/XCPU/Interpreter/PPC_Instruction.cpp
-    Xenon/Core/XCPU/Interpreter/PPC_Instruction.h
-    Xenon/Core/XCPU/Interpreter/PPC_LS.cpp
-    Xenon/Core/XCPU/Interpreter/PPC_BC.cpp
-    Xenon/Core/XCPU/Interpreter/PPC_System.cpp
-    Xenon/Core/XCPU/Interpreter/PPCInterpreter.cpp
-    Xenon/Core/XCPU/Interpreter/PPCInterpreter.h
-    Xenon/Core/XCPU/Interpreter/PPCInternal.h
-    Xenon/Core/XCPU/Interpreter/PPCOpcodes.h
-    Xenon/Core/XCPU/PostBus/PostBus.cpp
-    Xenon/Core/XCPU/PostBus/PostBus.h
-    Xenon/Core/XCPU/PPU/PPU.cpp
-    Xenon/Core/XCPU/PPU/PPU.h
-    Xenon/Core/XCPU/PPU/PowerPC.h
-)
+if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  add_compile_options(-mssse3)
+endif()
 
-set(OPENGL
-    third_party/glad/src/glad.c
-)
+# Include Deps/ThirdParty and Packages
+if (GFX_ENABLED)
+  find_package(SDL3 3.2.4 CONFIG)
+  find_package(sirit CONFIG)
+endif()
 
-set(XGPU
-    ${OPENGL}
-    Xenon/Core/XGPU/XGPU.cpp
-    Xenon/Core/XGPU/XenosRegisters.h
-    Xenon/Core/XGPU/XGPU.h
-    Xenon/Core/XGPU/XGPUConfig.h
-)
+find_package(asmjit CONFIG)
+find_package(fmt 10.2.1 CONFIG)
+find_package(toml11 4.4.0 CONFIG)
 
-set(Core
-    ${NAND}
-    ${RAM}
-    ${RootBus}
-    ${XCPU}
-    ${XGPU}
-)
+include_directories(Xenon)
+add_subdirectory(Deps/ThirdParty)
+
+# Include Files
+file(GLOB_RECURSE Base Xenon/Base/*.cpp Xenon/Base/*.h)
+
+file(GLOB_RECURSE Core Xenon/Core/*.cpp Xenon/Core/*.h)
+
+if (GFX_ENABLED)
+  set(ImGuiDir Deps/ThirdParty/ImGui)
+  set(ImGuiBackends
+    ${ImGuiDir}/backends/imgui_impl_opengl3.cpp
+    ${ImGuiDir}/backends/imgui_impl_opengl3.h
+    ${ImGuiDir}/backends/imgui_impl_sdl3.cpp
+    ${ImGuiDir}/backends/imgui_impl_sdl3.h
+  )
+  file(GLOB ImGui ${ImGuiDir}/*.cpp ${ImGuiDir}/*.h)
+  file(GLOB_RECURSE XenonRender Xenon/Render/*.cpp Xenon/Render/*.h)
+  set(Render
+    ${ImGuiBackends}
+    ${ImGui}
+    ${XenonRender}
+  )
+endif()
+
+file(GLOB_RECURSE include Xenon/include/*.cpp Xenon/include/*.h)
+
+set(microprofile_dir Deps/ThirdParty/microprofile)
+file(GLOB microprofile ${microprofile_dir}/*.cpp ${microprofile_dir}/*.h)
 
 add_executable(Xenon
-    ${Base}
-    ${Core}
-    Xenon/Xe_Main.cpp
+  ${Base}
+  ${Core}
+  ${Render}
+  ${include}
+  ${microprofile}
+  Xenon/Main.cpp
 )
 
-create_target_directory_groups(Xenon)
+target_precompile_headers(Xenon PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Xenon/Base/Global.h)
 
-# Include OPENGL Directory
-include_directories(Xenon third_party/glad/include)
+if (GFX_ENABLED)
+  add_compile_definitions(GFX_ENABLED)
+else()
+  add_compile_definitions(NO_GFX)
+endif()
 
-target_include_directories(Xenon PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(Xenon PRIVATE fmt::fmt SDL3::SDL3 toml11::toml11)
+if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo" OR "Debug")
+  add_compile_definitions(DEBUG_BUILD)
+endif()
 
-add_definitions(-DNTDDI_VERSION=0x0A000006 -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00)
-add_definitions(-DNOMINMAX -DWIN32_LEAN_AND_MEAN)
+# Link libraries
+target_link_libraries(Xenon PRIVATE fmt::fmt toml11::toml11 asmjit::asmjit)
+if (GFX_ENABLED)
+  target_link_libraries(Xenon PRIVATE glad sirit SDL3::SDL3)
+endif()
 
+# Add includes
+target_include_directories(Xenon PRIVATE ${microprofile_dir} Xenon/include)
+if (GFX_ENABLED)
+    target_include_directories(Xenon PRIVATE ${ImGuiDir})
+endif()
+
+# Add defines specific to windows
 if (WIN32)
-    target_sources(Xenon PRIVATE Xenon/Xenon.rc)
+  target_link_libraries(Xenon PRIVATE ws2_32)
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+
+  # Disables Warnings
+  add_compile_definitions(_WINSOCK_DEPRECATED_NO_WARNINGS _CRT_SECURE_NO_WARNINGS)
+
+  # Add .rc file, for the app icon and executable properties
+  target_sources(Xenon PRIVATE Xenon/Xenon.rc)
+endif()
+
+
+# Specific to MSVC, forces system version so the autodetected 8.1 SDK isn't used
+# Also enables multi-processor (multithreaded) compiling on MSVC
+if (msvc AND NOT clang)
+  set(CMAKE_GENERATOR_PLATFORM x64)
+  set(CMAKE_SYSTEM_VERSION 10.0.19041.0)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP")
 endif()

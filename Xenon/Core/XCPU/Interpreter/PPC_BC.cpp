@@ -1,97 +1,73 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #include "Base/Config.h"
+#include "Core/XeMain.h"
 
 #include "PPCInterpreter.h"
 
-void PPCInterpreter::PPCInterpreter_bc(PPU_STATE *hCore) {
-  B_FORM_BO_BI_BD_AA_LK;
-
-  if (!BO_GET(2)) {
-    hCore->ppuThread[hCore->currentThread].SPR.CTR -= 1;
+// Branch Conditional
+void PPCInterpreter::PPCInterpreter_bc(PPU_STATE *ppuState) {
+  if ((_instr.bo & 0x4) == 0) {
+    curThread.SPR.CTR -= 1;
   }
 
-  bool ctrOk =
-      BO_GET(2) |
-      ((hCore->ppuThread[hCore->currentThread].SPR.CTR != 0) ^ BO_GET(3));
-  bool condOk = BO_GET(0) || (CR_GET(BI) == BO_GET(1));
+  const bool ctrOk = ((_instr.bo & 0x4) != 0 ? 1 : 0) | ((curThread.SPR.CTR != 0) ^ ((_instr.bo & 0x2) != 0));
+  const bool condOk = ((_instr.bo & 0x10) != 0 ? 1 : 0) || (CR_GET(_instr.bi) == ((_instr.bo & 0x8) != 0));
 
   if (ctrOk && condOk) {
-    hCore->ppuThread[hCore->currentThread].NIA =
-        (AA ? 0 : hCore->ppuThread[hCore->currentThread].CIA) +
-        (EXTS(BD, 14) << 2);
+    curThread.NIA = (_instr.aa ? 0 : curThread.CIA) + (EXTS(_instr.ds, 14) << 2);
   }
 
-  if (LK) {
-    hCore->ppuThread[hCore->currentThread].SPR.LR =
-        hCore->ppuThread[hCore->currentThread].CIA + 4;
+  if (_instr.lk) {
+    curThread.SPR.LR = curThread.CIA + 4;
   }
 }
 
-void PPCInterpreter::PPCInterpreter_b(PPU_STATE *hCore) {
-  I_FORM_LI_AA_LK;
-  hCore->ppuThread[hCore->currentThread].NIA =
-      (AA ? 0 : hCore->ppuThread[hCore->currentThread].CIA) +
-      (EXTS(LI, 24) << 2);
+// Branch
+void PPCInterpreter::PPCInterpreter_b(PPU_STATE *ppuState) {
+  curThread.NIA = (_instr.aa ? 0 : curThread.CIA) + _instr.bt24;
 
-  if (LK) {
-    hCore->ppuThread[hCore->currentThread].SPR.LR =
-        hCore->ppuThread[hCore->currentThread].CIA + 4;
+  if (_instr.lk) {
+    curThread.SPR.LR = curThread.CIA + 4;
   }
 }
 
-void PPCInterpreter::PPCInterpreter_bcctr(PPU_STATE *hCore) {
-  XL_FORM_BO_BI_BH_LK;
-
-  bool condOk = BO_GET(0) || (CR_GET(BI) == BO_GET(1));
+// Branch Conditional to Count Register
+void PPCInterpreter::PPCInterpreter_bcctr(PPU_STATE *ppuState) {
+  const bool condOk = ((_instr.bo & 0x10) != 0 ? 1 : 0) || (CR_GET(_instr.bi) == ((_instr.bo & 0x8) != 0));
 
   if (condOk) {
-    hCore->ppuThread[hCore->currentThread].NIA =
-        hCore->ppuThread[hCore->currentThread].SPR.CTR & ~3;
+    curThread.NIA = curThread.SPR.CTR & ~3;
   }
 
-  if (LK) {
-    hCore->ppuThread[hCore->currentThread].SPR.LR =
-        hCore->ppuThread[hCore->currentThread].CIA + 4;
+  if (_instr.lk) {
+    curThread.SPR.LR = curThread.CIA + 4;
   }
 }
 
-void PPCInterpreter::PPCInterpreter_bclr(PPU_STATE *hCore) {
-  XL_FORM_BO_BI_BH_LK;
-
-  if (!BO_GET(2)) {
-    hCore->ppuThread[hCore->currentThread].SPR.CTR -= 1;
+// Branch Conditional to Link Register
+void PPCInterpreter::PPCInterpreter_bclr(PPU_STATE *ppuState) {
+  if ((_instr.bo & 0x4) != 0 ? false : true) {
+    curThread.SPR.CTR -= 1;
   }
 
-  bool ctrOk =
-      BO_GET(2) |
-      ((hCore->ppuThread[hCore->currentThread].SPR.CTR != 0) ^ BO_GET(3));
-  bool condOk = BO_GET(0) || (CR_GET(BI) == BO_GET(1));
+  const bool ctrOk = ((_instr.bo & 0x4) != 0 ? 1 : 0) | ((curThread.SPR.CTR != 0) ^ ((_instr.bo & 0x2) != 0));
+  bool condOk = ((_instr.bo & 0x10) != 0 ? 1 : 0) || (CR_GET(_instr.bi) == ((_instr.bo & 0x8) != 0));
 
-  // Jrunner XDK build offsets are 0x0000000003003f48 AND 0x0000000003003fdc
-  // xell version are 0x0000000003003dc0 AND 0x0000000003003e54
-
-  if (Config::HW_INIT_SKIP1() != 0) {
-    if (hCore->ppuThread[hCore->currentThread].CIA == Config::HW_INIT_SKIP1())
+  // CB/SB Hardware Init step skip (hacky)
+  if (XeMain::sfcx && XeMain::sfcx->initSkip1 && XeMain::sfcx->initSkip2) {
+    if (curThread.CIA == XeMain::sfcx->initSkip1)
       condOk = false;
 
-    if (hCore->ppuThread[hCore->currentThread].CIA == Config::HW_INIT_SKIP2())
-      condOk = true;
-  } else {
-    if (hCore->ppuThread[hCore->currentThread].CIA == 0x0000000003003f48)
-      condOk = false;
-
-    if (hCore->ppuThread[hCore->currentThread].CIA == 0x0000000003003fdc)
+    if (curThread.CIA == XeMain::sfcx->initSkip2)
       condOk = true;
   }
 
   if (ctrOk && condOk) {
-    hCore->ppuThread[hCore->currentThread].NIA =
-        hCore->ppuThread[hCore->currentThread].SPR.LR & ~3;
+    curThread.NIA = curThread.SPR.LR & ~3;
   }
 
-  if (LK) {
-    hCore->ppuThread[hCore->currentThread].SPR.LR =
-        hCore->ppuThread[hCore->currentThread].CIA + 4;
+  if (_instr.lk) {
+    curThread.SPR.LR = curThread.CIA + 4;
   }
 }

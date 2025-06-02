@@ -1,7 +1,11 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
+
+#include "Base/Global.h"
+#include "Core/NAND/NAND.h"
+#include "Core/XCPU/PostBus/PostBus.h"
+#include "Core/XCPU/Xenon.h"
 
 #include "PPCInterpreter.h"
-#include "Core/XCPU/PostBus/PostBus.h"
 
 //
 // Xbox 360 Memory map, info taken from various sources.
@@ -86,111 +90,231 @@ struct PPC_HPTE64 {
   u64 pte1;
 };
 
-void PPCInterpreter::PPCInterpreter_slbia(PPU_STATE *hCore) {
-  for (auto &slbEntry : hCore->ppuThread[hCore->currentThread].SLB) {
-    slbEntry.V = 0;
+inline bool mmuComparePTE(u64 VA, u64 VPN, u64 pte0, u64 pte1, u8 p, bool L, bool LP, u64 *RPN) {
+  // Requirements:
+  // PTE[H] = 0 for the primary PTEG, 1 for the secondary PTEG
+  // PTE[V] = 1
+  // PTE[AVPN][0:51] = VA[0:51]
+  // if p < 28, PTEAVPN[52:51 + q] = VA[52 : 51 + q]
+  // PTE[LP] = SLBE[LP] whenever PTE[L] = 1
+
+  // Valid
+  bool pteV = (pte0 & PPC_HPTE64_VALID);
+  // L
+  bool pteL = (pte0 & PPC_HPTE64_LARGE) >> 2;
+  // LP
+  bool pteLP = (pte1 & PPC_HPTE64_LP) >> 12;
+  // AVPN 0:51
+  const u64 pteAVPN_0_51 = (pte0 & PPC_HPTE64_AVPN_0_51) << 16;
+  // q = minimum(5, 28-p).
+  const u8 q = std::min(5, 28 - p);
+
+  if (!pteV) {
+    return false;
   }
+
+  if (pteAVPN_0_51 != (VA & 0xFFFFFFFFF0000000)) {
+    return false;
+  }
+
+  if (L != pteL) {
+    LOG_DEBUG(Xenon_MMU, "L mismatch: L={}, PTE[L]={}", L, pteL);
+    return false;
+  }
+
+  if (L && LP != pteLP) {
+    LOG_DEBUG(Xenon_MMU, "LP mismatch: LP={}, PTE[LP]={}", LP, pteLP);
+    return false;
+  }
+
+  bool match = false;
+
+  // Behave differently for pre-calculated VPN's.
+  if (VPN != 0) {
+    u64 compareMask = 0;
+    switch (p) {
+    case MMU_PAGE_SIZE_4KB:   compareMask = 0xFFFFFFFFFFF00000; break; // VA[0:59]
+    case MMU_PAGE_SIZE_64KB:  compareMask = 0xFFFFFFFFFF000000; break; // VA[0:55]
+    case MMU_PAGE_SIZE_16MB:  compareMask = 0xFFFFFFFF00000000; break; // VA[0:47]
+    }
+
+    const u64 pteVPNAndMask = VPN & compareMask;
+    const u64 vaAndMask = VA & compareMask;
+
+    if (pteVPNAndMask == vaAndMask) { match = true; }
+  } else {
+    // if p < 28, PTEAVPN[52:51 + q] = VA[52 : 51 + q]
+    if (p < 28) {
+      const u64 pteAVPNMask = (PPCRotateMask(52, 51 + q) & pte0);
+      const u64 vaMask = ((PPCRotateMask(36, 35 + q) & VA) >> 16);
+      if (pteAVPNMask == vaMask) { match = true; }
+    }
+  }
+
+  // Match
+  if (match) {
+    // RPN = PTE[86:114] : PTE[86:115].
+    *RPN = L ? pte1 & PPC_HPTE64_RPN_LP : pte1 & PPC_HPTE64_RPN_NO_LP;
+  }
+
+  return match;
 }
 
-void PPCInterpreter::PPCInterpreter_tlbiel(PPU_STATE *hCore) {
-  X_FORM_L_rB
+// SLB Invalidate All
+void PPCInterpreter::PPCInterpreter_slbia(PPU_STATE *ppuState) {
+  for (auto &slbEntry : curThread.SLB) {
+    slbEntry.V = 0;
+  }
+  // Invalidate both ERAT's
+  curThread.iERAT.invalidateAll();
+  curThread.dERAT.invalidateAll();
+}
 
-  // The PPU adds two new fields to this instruction, them being LP abd IS.
+// TLB Invalidate Entry Local
+void PPCInterpreter::PPCInterpreter_tlbiel(PPU_STATE *ppuState) {
+  // The PPU adds two new fields to this instruction, them being LP and IS.
 
-  bool LP = (hCore->ppuThread[hCore->currentThread].GPR[rB] & 0x1000) >> 12;
-  bool invalSelector =
-      (hCore->ppuThread[hCore->currentThread].GPR[rB] & 0x800) >> 11;
-  u8 p = mmuGetPageSize(hCore, L, LP);
-  u64 VA, VPN = 0;
+  const bool LP = (GPRi(rb) & 0x1000) >> 12;
+  const bool invalSelector = (GPRi(rb) & 0x800) >> 11;
+  const u8 p = mmuGetPageSize(ppuState, _instr.l10, LP);
 
-  if (invalSelector == 0) {
-    // The TLB is as selective as possible when invalidating TLB entries.The
-    // invalidation match criteria is VPN[38:79 - p], L, LP, and LPID.
-
-    VA = hCore->ppuThread[hCore->currentThread].GPR[rB];
-
-    if (VA > 0x7FFFFFFF) {
-      VPN = (VA >> 16) & ~0x7F;
-    } else if (VA > 0x20000000) {
-      if (p == 0x18)
-        VPN = (VA >> 16) & ~0xFF;
-      else
-        VPN = (VA >> 16) & ~0x7F;
-    } else {
-      VPN = (VA >> 16) & ~0xF;
-    }
-
-    for (auto &tlbEntry : hCore->TLB.tlbSet0) {
-      if (tlbEntry.V && tlbEntry.VPN == VPN && tlbEntry.p == p) {
-        tlbEntry.V = 0;
-      }
-    }
-    for (auto &tlbEntry : hCore->TLB.tlbSet1) {
-      if (tlbEntry.V && tlbEntry.VPN == VPN && tlbEntry.p == p) {
-        tlbEntry.V = 0;
-      }
-    }
-    for (auto &tlbEntry : hCore->TLB.tlbSet2) {
-      if (tlbEntry.V && tlbEntry.VPN == VPN && tlbEntry.p == p) {
-        tlbEntry.V = 0;
-      }
-    }
-    for (auto &tlbEntry : hCore->TLB.tlbSet3) {
-      if (tlbEntry.V && tlbEntry.VPN == VPN && tlbEntry.p == p) {
-        tlbEntry.V = 0;
-      }
-    }
-  } else {
+  if (invalSelector) {
     // Index to one of the 256 rows of the tlb. Possible entire tlb
     // invalidation.
     u8 tlbCongruenceClass = 0;
-    u64 rb_44_51 =
-        (hCore->ppuThread[hCore->currentThread].GPR[rB] & 0xFF000) >> 12;
+    const u64 rb_44_51 = (GPRi(rb) & 0xFF000) >> 12;
 
-    hCore->TLB.tlbSet0[rb_44_51].V = false;
-    hCore->TLB.tlbSet0[rb_44_51].VPN = 0;
-    hCore->TLB.tlbSet0[rb_44_51].RPN = 0;
-    hCore->TLB.tlbSet0[rb_44_51].L = false;
-    hCore->TLB.tlbSet0[rb_44_51].LP = 0;
-    hCore->TLB.tlbSet0[rb_44_51].p = 0;
+    ppuState->TLB.tlbSet0[rb_44_51].V = false;
+    ppuState->TLB.tlbSet0[rb_44_51].pte0 = 0;
+    ppuState->TLB.tlbSet0[rb_44_51].pte1 = 0;
 
-    hCore->TLB.tlbSet1[rb_44_51].V = false;
-    hCore->TLB.tlbSet1[rb_44_51].VPN = 0;
-    hCore->TLB.tlbSet1[rb_44_51].RPN = 0;
-    hCore->TLB.tlbSet1[rb_44_51].L = false;
-    hCore->TLB.tlbSet1[rb_44_51].LP = 0;
-    hCore->TLB.tlbSet1[rb_44_51].p = 0;
+    ppuState->TLB.tlbSet1[rb_44_51].V = false;
+    ppuState->TLB.tlbSet1[rb_44_51].pte0 = 0;
+    ppuState->TLB.tlbSet1[rb_44_51].pte1 = 0;
 
-    hCore->TLB.tlbSet2[rb_44_51].V = false;
-    hCore->TLB.tlbSet2[rb_44_51].VPN = 0;
-    hCore->TLB.tlbSet2[rb_44_51].RPN = 0;
-    hCore->TLB.tlbSet2[rb_44_51].L = false;
-    hCore->TLB.tlbSet2[rb_44_51].LP = 0;
-    hCore->TLB.tlbSet2[rb_44_51].p = 0;
+    ppuState->TLB.tlbSet2[rb_44_51].V = false;
+    ppuState->TLB.tlbSet2[rb_44_51].pte0 = 0;
+    ppuState->TLB.tlbSet2[rb_44_51].pte1 = 0;
 
-    hCore->TLB.tlbSet3[rb_44_51].V = false;
-    hCore->TLB.tlbSet3[rb_44_51].VPN = 0;
-    hCore->TLB.tlbSet3[rb_44_51].RPN = 0;
-    hCore->TLB.tlbSet3[rb_44_51].L = false;
-    hCore->TLB.tlbSet3[rb_44_51].LP = 0;
-    hCore->TLB.tlbSet3[rb_44_51].p = 0;
+    ppuState->TLB.tlbSet3[rb_44_51].V = false;
+    ppuState->TLB.tlbSet3[rb_44_51].pte0 = 0;
+    ppuState->TLB.tlbSet3[rb_44_51].pte1 = 0;
+
+    // Should only invalidate entries for a specific set of addresses.
+    // Invalidate both ERAT's *** BUG *** !!!
+    curThread.iERAT.invalidateAll();
+    curThread.dERAT.invalidateAll();
+  } else {
+    // The TLB is as selective as possible when invalidating TLB entries.The
+    // invalidation match criteria is VPN[38:79 - p], L, LP, and LPID.
+
+    const u64 rb = GPRi(rb);
+    u64 rpn = 0;
+
+    u64 compareMask = 0;
+
+    // TODO(bitsh1ft3r): Investigate this behavior. Why do 64kb and 16 mb behave the same?
+    // and why doesn't is work as docs dictate.
+    switch (p) {
+    case MMU_PAGE_SIZE_4KB:   compareMask = 0xFFFFFFFFFFF00000; break;
+    case MMU_PAGE_SIZE_64KB:  compareMask = 0xFFFFFFFFFF000000; break;
+    case MMU_PAGE_SIZE_16MB:  compareMask = 0xFFFFFFFFFF000000; break;
+    }
+
+    for (auto &tlbEntry : ppuState->TLB.tlbSet0) {
+      if (tlbEntry.V && ((tlbEntry.VPN & compareMask) == (rb & compareMask))) {
+#ifdef DEBUG_BUILD
+        if (Config::log.advanced)
+          LOG_TRACE(Xenon_MMU, "TLBIEL: Invalidating entry for RPN: 0x{:X}", rpn);
+#endif
+        tlbEntry.V = false;
+        tlbEntry.VPN = 0;
+        tlbEntry.pte0 = 0;
+        tlbEntry.pte1 = 0;
+      }
+    }
+    for (auto &tlbEntry : ppuState->TLB.tlbSet1) {
+      if (tlbEntry.V && ((tlbEntry.VPN & compareMask) == (rb & compareMask))) {
+#ifdef DEBUG_BUILD
+        if (Config::log.advanced)
+        LOG_TRACE(Xenon_MMU, "TLBIEL: Invalidating entry for RPN: 0x{:X}", rpn);
+#endif
+        tlbEntry.V = false;
+        tlbEntry.VPN = 0;
+        tlbEntry.pte0 = 0;
+        tlbEntry.pte1 = 0;
+      }
+    }
+    for (auto &tlbEntry : ppuState->TLB.tlbSet2) {
+      if (tlbEntry.V && ((tlbEntry.VPN & compareMask) == (rb & compareMask))) {
+#ifdef DEBUG_BUILD
+        if (Config::log.advanced)
+        LOG_TRACE(Xenon_MMU, "TLBIEL: Invalidating entry for RPN: 0x{:X}", rpn);
+#endif
+        tlbEntry.V = false;
+        tlbEntry.VPN = 0;
+        tlbEntry.pte0 = 0;
+        tlbEntry.pte1 = 0;
+      }
+    }
+    for (auto &tlbEntry : ppuState->TLB.tlbSet3) {
+      if (tlbEntry.V && ((tlbEntry.VPN & compareMask) == (rb & compareMask))) {
+#ifdef DEBUG_BUILD
+        if (Config::log.advanced)
+        LOG_TRACE(Xenon_MMU, "TLBIEL: Invalidating entry for RPN: 0x{:X}", rpn);
+#endif
+        tlbEntry.V = false;
+        tlbEntry.VPN = 0;
+        tlbEntry.pte0 = 0;
+        tlbEntry.pte1 = 0;
+      }
+    }
+    // Should only invalidate entries for a specific set of addresses.
+    // Invalidate both ERAT's *** BUG *** !!!
+    curThread.iERAT.invalidateAll();
+    curThread.dERAT.invalidateAll();
   }
 }
 
-void PPCInterpreter::PPCInterpreter_tlbie(PPU_STATE* hCore)
-{
-    // Do nothing.
-    LOG_INFO(Xenon, "tlbie");
+/*
+  The PowerPC instruction tlbie searches the Translation Look-Aside Buffer (TLB) for an entry corresponding to the effective address (EA).
+  The search is done regardless of the setting of Machine State Register (MSR) Instruction Relocate bit or the MSR Data Relocate bit.
+  The search uses a portion of the EA including the least significant bits, and ignores the content of the Segment Registers.
+  Entries that satisfy the search criteria are made invalid so will not be used to translate subsequent storage accesses.
+*/
+// rB is the GPR containing the EA for the search
+// L is the page size
+
+// TLB Invalidate Entry
+void PPCInterpreter::PPCInterpreter_tlbie(PPU_STATE *ppuState) {
+  const u64 EA = GPRi(rb);
+  bool LP = (GPRi(rb) & 0x1000) >> 12;
+  const u8 p = mmuGetPageSize(ppuState, _instr.l10, LP);
+  // Inverse of log2, as log2 is 2^? (finding ?)
+  // Example: the Log2 of 4096 is 12, because 2^12 is 4096
+  u64 fullPageSize = pow(2, p);
+#ifdef DEBUG_BUILD
+  if (Config::log.advanced)
+    LOG_TRACE(Xenon, "tlbie, EA:0x{:X} | PageSize:{} | Full:0x{:X},{} | LP:{}", EA, p, fullPageSize, fullPageSize, LP ? "true" : "false");
+#endif
+  for (u64 i{}; i != fullPageSize; ++i) {
+    curThread.iERAT.invalidateElement(EA+i);
+    curThread.dERAT.invalidateElement(EA+i);
+  }
 }
 
-void PPCInterpreter::PPCInterpreter_tlbsync(PPU_STATE* hCore)
-{
-    // Do nothing.
-    LOG_INFO(Xenon, "tlbsync");
+// TLB Synchronize
+void PPCInterpreter::PPCInterpreter_tlbsync(PPU_STATE *ppuState) {
+  // Do nothing
+#ifdef DEBUG_BUILD
+  if (Config::log.advanced)
+    LOG_TRACE(Xenon, "tlbsync");
+#endif
 }
 
 // Helper function for getting Page Size (p bit).
-u8 PPCInterpreter::mmuGetPageSize(PPU_STATE *hCore, bool L, u8 LP) {
+u8 PPCInterpreter::mmuGetPageSize(PPU_STATE *ppuState, bool L, u8 LP) {
+  MICROPROFILE_SCOPEI("[Xe::PPCInterpreter]", "MMUGetPageSize", MP_AUTO);
 
   // Large page selection works the following way:
   // First check if pages are large (L)
@@ -200,8 +324,8 @@ u8 PPCInterpreter::mmuGetPageSize(PPU_STATE *hCore, bool L, u8 LP) {
 
   // HID6 16-17 bits select Large Page size 1.
   // HID6 18-19 bits select Large Page size 2.
-  u8 LB_16_17 = (u8)QGET(hCore->SPR.HID6, 16, 17);
-  u8 LB_18_19 = (u8)QGET(hCore->SPR.HID6, 18, 19);
+  const u8 LB_16_17 = static_cast<u8>(QGET(ppuState->SPR.HID6, 16, 17));
+  const u8 LB_18_19 = static_cast<u8>(QGET(ppuState->SPR.HID6, 18, 19));
 
   // Final p size.
   u8 p = 0;
@@ -235,7 +359,7 @@ u8 PPCInterpreter::mmuGetPageSize(PPU_STATE *hCore, bool L, u8 LP) {
         pSize = 1048576; // 1 Mb page size
         break;
       case 0b0010:
-        pSize = 65536; // 16 Mb page size
+        pSize = 65536; // 64 Kb page size
         break;
       }
     }
@@ -247,121 +371,74 @@ u8 PPCInterpreter::mmuGetPageSize(PPU_STATE *hCore, bool L, u8 LP) {
 }
 
 // This is done when TLB Reload is in software-controlled mode.
-void PPCInterpreter::mmuAddTlbEntry(PPU_STATE *hCore) {
-#define PPE_TLB_INDEX_LVPN_MASK 0xE00000000000
-#define MMU_GET_TLB_INDEX_TI(x) ((u16)((x & 0xFF0) >> 4))
-#define MMU_GET_TLB_INDEX_TS(x) ((u16)(x & 0xF))
+void PPCInterpreter::mmuAddTlbEntry(PPU_STATE *ppuState) {
+  MICROPROFILE_SCOPEI("[Xe::PPCInterpreter]", "MMUAddTlbEntry", MP_AUTO);
+  // In said mode, software makes use of special registers of the CPU to directly reload the TLB
+  // with PTE's, thus eliminating the need of a hardware page table and tablewalk.
 
-#define PPE_TLB_VPN_V_MASK 0x1
-#define PPE_TLB_VPN_L_MASK 0x4
-#define PPE_TLB_VPN_AVPN_MASK 0x1FFFFFFFFFF80
-#define PPE_TLB_VPN_AVPN_16MB_MASK 0x1FFFFFFFFFF00
+#define MMU_GET_TLB_INDEX_TI(x)   (static_cast<u16>((x & 0xFF0) >> 4))
+#define MMU_GET_TLB_INDEX_TS(x)   (static_cast<u16>(x & 0xF))
+#define MMU_GET_TLB_INDEX_LVPN(x) (static_cast<u64>((x & 0xE00000000000) >> 25))
 
-#define PPE_TLB_RPN_ARPN_MASK 0x3FFFFFFE000
-#define PPE_TLB_RPN_ARPN_AND_LP_MASK 0x3FFFFFFF000
-#define PPE_TLB_RPN_LP_MASK 0x1000
+  const u64 tlbIndex = ppuState->SPR.PPE_TLB_Index;
+  const u64 tlbVpn = ppuState->SPR.PPE_TLB_VPN;
+  const u64 tlbRpn = ppuState->SPR.PPE_TLB_RPN;
 
-  u64 tlbIndex = hCore->SPR.PPE_TLB_Index;
-  u64 tlbVpn = hCore->SPR.PPE_TLB_VPN;
-  u64 tlbRpn = hCore->SPR.PPE_TLB_RPN;
+  // TLB Index (0 - 255) of current tlb set.
+  const u16 TI = MMU_GET_TLB_INDEX_TI(tlbIndex);
+  // TLB Set.
+  const u16 TS = MMU_GET_TLB_INDEX_TS(tlbIndex);
 
-  // Valid entry.
-  bool vpnValid = tlbVpn & PPE_TLB_VPN_V_MASK;
-  // Large pages.
-  bool L = (tlbVpn & PPE_TLB_VPN_L_MASK) >> 2;
-  // Large pages selector
-  u32 LP = (tlbRpn & PPE_TLB_RPN_LP_MASK) >> 12;
-
-  // Get Page Size
-  u8 p = mmuGetPageSize(hCore, L, LP);
-
-  // AVPN
-  u64 AVPN = 0;
-
-  // VPN = AVPN concatenated with LVPN
-  // The AVPN corresponds to VPN[15:56].
-  // When reading a 16 MB TLB entry, bit [56] of the AVPN is undefined.
-  if (p == MMU_PAGE_SIZE_16MB) // 16 Mb entry
-  {
-    AVPN = tlbVpn & PPE_TLB_VPN_AVPN_16MB_MASK;
-  } else {
-    AVPN = tlbVpn & PPE_TLB_VPN_AVPN_MASK;
-  }
-
-  u64 ARPN = 0;
-
-  if (L) {
-    ARPN = tlbRpn & PPE_TLB_RPN_ARPN_MASK;
-  } else {
-    ARPN = tlbRpn & PPE_TLB_RPN_ARPN_AND_LP_MASK;
-  }
-
+  //  The abbreviated virtual page number (AVPN)[0:56] corresponds to VPN[0:56].
+  const u64 AVPN = (tlbVpn & PPC_HPTE64_AVPN) << 16;
   // LVPN[0:2] corresponds to VPN[57:59].
-  u64 LVPN = (tlbIndex & PPE_TLB_INDEX_LVPN_MASK) >> 41;
+  const u64 LVPN = MMU_GET_TLB_INDEX_LVPN(tlbIndex);
 
-  // Virtual page number
-  u64 VPN = AVPN | LVPN;
+  // Our PTE VPN, pre calculated for ease of use.
+  const u64 VPN = AVPN | LVPN;
 
-  // Real Page Number
-  // The ARPN corresponds to RPN[22:50].
-  // To obtain the full 30 - bit RPN, the ARPN is combined with the LP field.
-  // We already did that.
-  u64 RPN = ARPN;
-
-  // Tlb Index (0 - 255) of current tlb set.
-  u16 TI = MMU_GET_TLB_INDEX_TI(tlbIndex);
-  u16 TS = MMU_GET_TLB_INDEX_TS(tlbIndex);
-
-  // std::cout << "XCPU[" << hCore->ppuName << "(Thrd"<< hCore->currentThread
-  //     << ")](MMU) : Adding tlb entry : (" << TI * TS << ")" << std::endl;
-  // std::cout << " *** RPN:         0x" << RPN << std::endl;
-  // std::cout << " *** VPN:         0x" << VPN << std::endl;
-  // std::cout << "  *  TLB Set:     " << std::dec << TS << std::endl;
-  // std::cout << "  *  TLB Index:   " << std::hex << TI << std::endl;
-  // std::cout << "  *  p Size:      " << (u16)p << std::endl;
-  // std::cout << std::hex << std::endl;
+#ifdef DEBUG_BUILD
+  if (XeMain::GetCPU()) {
+    PPU *ppu = XeMain::GetCPU()->GetPPU(ppuState->ppuID);
+    if (ppu && ppu->traceFile) {
+      fprintf(ppu->traceFile, "TLB[%d:%d] map 0x%llx -> 0x%llx\n", TS, TI, tlbVpn, tlbRpn);
+    }
+  }
+#endif
 
   // TLB set to choose from
   // There are 4 sets of 256 entries each:
   switch (TS) {
   case 0b1000:
-    hCore->TLB.tlbSet0[TI].V = true;
-    hCore->TLB.tlbSet0[TI].RPN = RPN;
-    hCore->TLB.tlbSet0[TI].VPN = VPN;
-    hCore->TLB.tlbSet0[TI].p = p;
-    hCore->TLB.tlbSet0[TI].L = L;
-    hCore->TLB.tlbSet0[TI].LP = LP;
+    ppuState->TLB.tlbSet0[TI].V = true;
+    ppuState->TLB.tlbSet0[TI].VPN = VPN;
+    ppuState->TLB.tlbSet0[TI].pte0 = tlbVpn;
+    ppuState->TLB.tlbSet0[TI].pte1 = tlbRpn;
     break;
   case 0b0100:
-    hCore->TLB.tlbSet1[TI].V = true;
-    hCore->TLB.tlbSet1[TI].RPN = RPN;
-    hCore->TLB.tlbSet1[TI].VPN = VPN;
-    hCore->TLB.tlbSet1[TI].p = p;
-    hCore->TLB.tlbSet1[TI].L = L;
-    hCore->TLB.tlbSet1[TI].LP = LP;
+    ppuState->TLB.tlbSet1[TI].V = true;
+    ppuState->TLB.tlbSet1[TI].VPN = VPN;
+    ppuState->TLB.tlbSet1[TI].pte0 = tlbVpn;
+    ppuState->TLB.tlbSet1[TI].pte1 = tlbRpn;
     break;
   case 0b0010:
-    hCore->TLB.tlbSet2[TI].V = true;
-    hCore->TLB.tlbSet2[TI].RPN = RPN;
-    hCore->TLB.tlbSet2[TI].VPN = VPN;
-    hCore->TLB.tlbSet2[TI].p = p;
-    hCore->TLB.tlbSet2[TI].L = L;
-    hCore->TLB.tlbSet2[TI].LP = LP;
+    ppuState->TLB.tlbSet2[TI].V = true;
+    ppuState->TLB.tlbSet2[TI].VPN = VPN;
+    ppuState->TLB.tlbSet2[TI].pte0 = tlbVpn;
+    ppuState->TLB.tlbSet2[TI].pte1 = tlbRpn;
     break;
   case 0b0001:
-    hCore->TLB.tlbSet3[TI].V = true;
-    hCore->TLB.tlbSet3[TI].RPN = RPN;
-    hCore->TLB.tlbSet3[TI].VPN = VPN;
-    hCore->TLB.tlbSet3[TI].p = p;
-    hCore->TLB.tlbSet3[TI].L = L;
-    hCore->TLB.tlbSet3[TI].LP = LP;
+    ppuState->TLB.tlbSet3[TI].V = true;
+    ppuState->TLB.tlbSet3[TI].VPN = VPN;
+    ppuState->TLB.tlbSet3[TI].pte0 = tlbVpn;
+    ppuState->TLB.tlbSet3[TI].pte1 = tlbRpn;
     break;
   }
 }
 
 // Translation Lookaside Buffer Search
-bool PPCInterpreter::mmuSearchTlbEntry(PPU_STATE *hCore, u64 *RPN, u64 VA,
-                                       u64 VPN, u8 p, bool LP) {
+bool PPCInterpreter::mmuSearchTlbEntry(PPU_STATE *ppuState, u64 *RPN, u64 VA, u8 p, bool L, bool LP) {
+  MICROPROFILE_SCOPEI("[Xe::PPCInterpreter]", "MMUSearchTlbEntry", MP_AUTO);
   // Index to choose from the 256 ways of the TLB
   u16 tlbIndex = 0;
   // Tlb Set that was least Recently used for replacement.
@@ -372,28 +449,22 @@ bool PPCInterpreter::mmuSearchTlbEntry(PPU_STATE *hCore, u64 *RPN, u64 VA,
   // 16MB - VA[48:55]
 
   // 52-55 bits of 80 VA
-  u16 bits36_39 = static_cast<u16>(QGET(VA, 36, 39));
+  const u16 bits36_39 = static_cast<u16>(QGET(VA, 36, 39));
   // 56-59 bits of 80 VA
-  u16 bits40_43 = static_cast<u16>(QGET(VA, 40, 43));
+  const u16 bits40_43 = static_cast<u16>(QGET(VA, 40, 43));
   // 60-63 bits of 80 VA
-  u16 bits44_47 = static_cast<u16>(QGET(VA, 44, 47));
+  const u16 bits44_47 = static_cast<u16>(QGET(VA, 44, 47));
   // 64-67 bits of 80 VA
-  u16 bits48_51 = static_cast<u16>(QGET(VA, 48, 51));
+  const u16 bits48_51 = static_cast<u16>(QGET(VA, 48, 51));
   // 48-55 bits of 80 VA
-  u16 bits32_39 = static_cast<u16>(QGET(VA, 32, 39));
+  const u16 bits32_39 = static_cast<u16>(QGET(VA, 32, 39));
 
   switch (p) {
   case MMU_PAGE_SIZE_64KB:
     tlbIndex = ((bits36_39 ^ bits40_43) << 4 | bits44_47);
     break;
   case MMU_PAGE_SIZE_16MB:
-    if (bits32_39 < 0x80 && bits32_39 > 0x20)
-      tlbIndex = bits32_39 & 0xF;
-    else if (bits32_39 < 0x20)
-      tlbIndex = bits32_39;
-    else {
-      tlbIndex = (bits40_43 << 4) ^ bits44_47;
-    }
+    tlbIndex = (VA >> 24) & 0xFF;
     break;
   default:
     // p = 12 bits, 4KB
@@ -401,89 +472,40 @@ bool PPCInterpreter::mmuSearchTlbEntry(PPU_STATE *hCore, u64 *RPN, u64 VA,
     break;
   }
 
-  if (hCore->TLB.tlbSet0[tlbIndex].V) {
-    if ((u16)hCore->TLB.tlbSet0[tlbIndex].VPN == (u16)VPN) {
-      // Check to see if its this entry!
-      // Need to have a tag
-      if (hCore->TLB.tlbSet0[tlbIndex].p == p) {
-        if (hCore->TLB.tlbSet0[tlbIndex].L) {
-          if (hCore->TLB.tlbSet0[tlbIndex].LP == LP) {
-            // Probably It!
-            *RPN = hCore->TLB.tlbSet0[tlbIndex].RPN;
-            return true;
-          }
-        } else {
-          // Probably It!
-          *RPN = hCore->TLB.tlbSet0[tlbIndex].RPN;
-          return true;
-        }
-      }
+  //
+  // Compare each valid entry at specified index in the TLB with the VA.
+  //
+  if (ppuState->TLB.tlbSet0[tlbIndex].V) {
+    if (mmuComparePTE(VA, ppuState->TLB.tlbSet0[tlbIndex].VPN, ppuState->TLB.tlbSet0[tlbIndex].pte0, 
+      ppuState->TLB.tlbSet0[tlbIndex].pte1, p, L, LP, RPN)) {
+      return true;
     }
   } else {
     // Entry was invalid, make this set the a candidate for refill.
     tlbSet = 0b1000;
   }
-  if (hCore->TLB.tlbSet1[tlbIndex].V) {
-    if ((u16)hCore->TLB.tlbSet1[tlbIndex].VPN == (u16)VPN) {
-      // Check to see if its this entry!
-      // Need to have a tag
-      if (hCore->TLB.tlbSet1[tlbIndex].p == p) {
-        if (hCore->TLB.tlbSet1[tlbIndex].L) {
-          if (hCore->TLB.tlbSet1[tlbIndex].LP == LP) {
-            // Probably It!
-            *RPN = hCore->TLB.tlbSet1[tlbIndex].RPN;
-            return true;
-          }
-        } else {
-          // Probably It!
-          *RPN = hCore->TLB.tlbSet1[tlbIndex].RPN;
-          return true;
-        }
-      }
+  if (ppuState->TLB.tlbSet1[tlbIndex].V) {
+    if (mmuComparePTE(VA, ppuState->TLB.tlbSet1[tlbIndex].VPN, ppuState->TLB.tlbSet1[tlbIndex].pte0, 
+      ppuState->TLB.tlbSet1[tlbIndex].pte1, p, L, LP, RPN)) {
+      return true;
     }
   } else {
     // Entry was invalid, make this set the a candidate for refill.
     tlbSet = 0b0100;
   }
-  if (hCore->TLB.tlbSet2[tlbIndex].V) {
-    if ((u16)hCore->TLB.tlbSet2[tlbIndex].VPN == (u16)VPN) {
-      // Check to see if its this entry!
-      // Need to have a tag
-      if (hCore->TLB.tlbSet2[tlbIndex].p == p) {
-        if (hCore->TLB.tlbSet2[tlbIndex].L) {
-          if (hCore->TLB.tlbSet2[tlbIndex].LP == LP) {
-            // Probably It!
-            *RPN = hCore->TLB.tlbSet2[tlbIndex].RPN;
-            return true;
-          }
-        } else {
-          // Probably It!
-          *RPN = hCore->TLB.tlbSet2[tlbIndex].RPN;
-          return true;
-        }
-      }
+  if (ppuState->TLB.tlbSet2[tlbIndex].V) {
+    if (mmuComparePTE(VA, ppuState->TLB.tlbSet2[tlbIndex].VPN, ppuState->TLB.tlbSet2[tlbIndex].pte0, 
+      ppuState->TLB.tlbSet2[tlbIndex].pte1, p, L, LP, RPN)) {
+      return true;
     }
   } else {
     // Entry was invalid, make this set the a candidate for refill.
     tlbSet = 0b0010;
   }
-  if (hCore->TLB.tlbSet3[tlbIndex].V) {
-    if ((u16)hCore->TLB.tlbSet3[tlbIndex].VPN == (u16)VPN) {
-      // Check to see if its this entry!
-      // Need to have a tag
-      if (hCore->TLB.tlbSet3[tlbIndex].p == p) {
-        if (hCore->TLB.tlbSet3[tlbIndex].L) {
-          if (hCore->TLB.tlbSet3[tlbIndex].LP == LP) {
-            // Probably It!
-            *RPN = hCore->TLB.tlbSet3[tlbIndex].RPN;
-            return true;
-          }
-        } else {
-          // Probably It!
-          *RPN = hCore->TLB.tlbSet3[tlbIndex].RPN;
-          return true;
-        }
-      }
+  if (ppuState->TLB.tlbSet3[tlbIndex].V) {
+    if (mmuComparePTE(VA, ppuState->TLB.tlbSet3[tlbIndex].VPN, ppuState->TLB.tlbSet3[tlbIndex].pte0,
+      ppuState->TLB.tlbSet3[tlbIndex].pte1, p, L, LP, RPN)) {
+      return true;
     }
   } else {
     // Entry was invalid, make this set the a candidate for refill.
@@ -497,18 +519,19 @@ bool PPCInterpreter::mmuSearchTlbEntry(PPU_STATE *hCore, u64 *RPN, u64 VA,
   // On normal conditions this is done for the LRU index of the TLB.
 
   // Software management of the TLB. 0 = Hardware, 1 = Software.
-  bool tlbSoftwareManaged = ((hCore->SPR.LPCR & 0x400) >> 10);
+  bool tlbSoftwareManaged = ((ppuState->SPR.LPCR & 0x400) >> 10);
 
   if (tlbSoftwareManaged) {
     u64 tlbIndexHint =
-        hCore->ppuThread[hCore->currentThread].SPR.PPE_TLB_Index_Hint;
+      curThread.SPR.PPE_TLB_Index_Hint;
     u8 currentTlbSet = tlbIndexHint & 0xF;
-    u8 currentTlbIndex = (u8)(tlbIndexHint & 0xFF0) >> 4;
+    u8 currentTlbIndex = static_cast<u8>(tlbIndexHint & 0xFF0) >> 4;
     currentTlbSet = tlbSet;
     if (currentTlbIndex == 0xFF) {
       if (currentTlbSet == 8) {
         currentTlbSet = 1;
-      } else {
+      }
+      else {
         currentTlbSet = currentTlbSet << 1;
       }
     }
@@ -518,37 +541,30 @@ bool PPCInterpreter::mmuSearchTlbEntry(PPU_STATE *hCore, u64 *RPN, u64 VA,
 
     tlbIndex = tlbIndex << 4;
     tlbIndexHint = tlbIndex |= currentTlbSet;
-    hCore->ppuThread[hCore->currentThread].SPR.PPE_TLB_Index_Hint =
-        tlbIndexHint;
+    curThread.SPR.PPE_TLB_Index_Hint = tlbIndexHint;
   }
   return false;
 }
 
 // Routine to read a string from memory, using a PSTRNG given by the kernel.
-void PPCInterpreter::mmuReadString(PPU_STATE *hCore, u64 stringAddress,
-                                   char *string, u32 maxLenght) {
+void PPCInterpreter::mmuReadString(PPU_STATE *ppuState, u64 stringAddress,
+                                   char *string, u32 maxLength) {
+  MICROPROFILE_SCOPEI("[Xe::PPCInterpreter]", "MMUReadString", MP_AUTO);
   u32 strIndex;
   u32 stringBufferAddress = 0;
-  u16 Length = 0;
+  const u16 strLength = MMURead16(ppuState, stringAddress);
 
-  Length = MMURead16(hCore, stringAddress);
-  if (Length < maxLenght)
-    maxLenght = Length + 1;
+  if (strLength < maxLength)
+    maxLength = strLength + 1;
 
-  // Search Buffer
-  stringBufferAddress = MMURead32(hCore, stringAddress + 4);
-
-  for (strIndex = 0; strIndex < maxLenght; strIndex++, stringBufferAddress++) {
-    string[strIndex] = MMURead8(hCore, stringBufferAddress);
-    if (string[strIndex] == 0)
-      break;
-  }
-
-  string[maxLenght - 1] = 0;
+  stringBufferAddress = MMURead32(ppuState, stringAddress + 4);
+  MMURead(CPUContext, ppuState, stringBufferAddress, maxLength, reinterpret_cast<u8*>(string));
+  string[maxLength - 1] = 0;
 }
 
 SECENG_ADDRESS_INFO
 PPCInterpreter::mmuGetSecEngInfoFromAddress(u64 inputAddress) {
+  MICROPROFILE_SCOPEI("[Xe::PPCInterpreter]", "MMUGetSecEngInfoFromAddress", MP_AUTO);
   // 0x00000X**_00000000 X = region, ** = key select
   // X = 0 should be Physical
   // X = 1 should be Hashed
@@ -557,12 +573,12 @@ PPCInterpreter::mmuGetSecEngInfoFromAddress(u64 inputAddress) {
 
   SECENG_ADDRESS_INFO addressInfo;
 
-  u64 regionMask = 0xF0000000000;
-  u64 keyMask = 0xFF00000000;
-  u32 region = (inputAddress & regionMask) >> 32;
+  constexpr u64 regionMask = 0xF0000000000;
+  constexpr u64 keyMask = 0xFF00000000;
+  const u32 region = (inputAddress & regionMask) >> 32;
 
-  addressInfo.keySelected = (u8)((inputAddress & keyMask) >> 32);
-  addressInfo.accesedAddr = static_cast<u32>(inputAddress);
+  addressInfo.keySelected = static_cast<u8>((inputAddress & keyMask) >> 32);
+  addressInfo.accessedAddr = static_cast<u32>(inputAddress);
 
   switch (region) {
   case 0x0:
@@ -585,6 +601,7 @@ PPCInterpreter::mmuGetSecEngInfoFromAddress(u64 inputAddress) {
 
 u64 PPCInterpreter::mmuContructEndAddressFromSecEngAddr(u64 inputAddress,
                                                         bool *socAccess) {
+  MICROPROFILE_SCOPEI("[Xe::PPCInterpreter]", "MMUContructEndAddressFromSecEngAddr", MP_AUTO);
   SECENG_ADDRESS_INFO inputAddressInfo =
       mmuGetSecEngInfoFromAddress(inputAddress);
 
@@ -593,19 +610,19 @@ u64 PPCInterpreter::mmuContructEndAddressFromSecEngAddr(u64 inputAddress,
   switch (inputAddressInfo.regionType) {
   case SECENG_REGION_PHYS:
     // Going to RAM directly.
-    outputAddress = inputAddressInfo.accesedAddr;
+    outputAddress = inputAddressInfo.accessedAddr;
     break;
   case SECENG_REGION_HASHED:
     // Going to RAM directly without hashing!
-    outputAddress = inputAddressInfo.accesedAddr;
+    outputAddress = inputAddressInfo.accessedAddr;
     break;
   case SECENG_REGION_SOC:
     *socAccess = true;
-    outputAddress = inputAddressInfo.accesedAddr;
+    outputAddress = inputAddressInfo.accessedAddr;
     break;
   case SECENG_REGION_ENCRYPTED:
     // Going to RAM directly without encryption!
-    outputAddress = inputAddressInfo.accesedAddr;
+    outputAddress = inputAddressInfo.accessedAddr;
     break;
   default:
     break;
@@ -614,8 +631,8 @@ u64 PPCInterpreter::mmuContructEndAddressFromSecEngAddr(u64 inputAddress,
 }
 
 // Main address translation mechanism used on the XCPU.
-bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
-                                         bool memWrite) {
+bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *ppuState,
+                                         bool memWrite, ePPUThread thr) {
   // Every time the CPU does a load or store, it goes trough the MMU.
   // The MMU decides based on MSR, and some other regs if address translation
   // for Instr/Data is in Real Mode (EA = RA) or in Virtual Mode (Page
@@ -623,30 +640,32 @@ bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
 
   // Xbox 360 MMU contains a very similar to the CELL-BE MMU.
   // Has two ERAT's (64 entry, 2 way), one for Instructions (I-ERAT) and Data
-  // (D-ERAT), this caches Effective to Physical adress translations done
+  // (D-ERAT), this  Effective to Physical adress translations done
   // recently.
   // It also contains a 1024 entry 4 * 256 columns TLB array, wich caches
   // recent Page tables. TLB on the Xbox 360 can be Software/Hardware managed.
   // This is controlled via TL bit of the LPCR SPR.
 
   /* TODO */
-  // Implement ERATS and ERAT handling code.
   // Implement L1 per-core data/inst cache and cache handling code.
+
+  MICROPROFILE_SCOPEI("[Xe::PPCInterpreter]", "MMUTranslateAddress", MP_AUTO);
 
   //
   // Current thread SPR's used in MMU..
   //
+  PPU_THREAD_REGISTERS &thread = ppuState->ppuThread[thr != ePPUThread_None ? thr : curThreadId];
 
   // Machine State Register.
-  MSR _msr = hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR;
+  const MSRegister _msr = thread.SPR.MSR;
   // Logical Partition Control Register.
-  u64 LPCR = hCoreState->SPR.LPCR;
+  const u64 LPCR = ppuState->SPR.LPCR;
   // Hypervisor Real Mode Offset Register.
-  u64 HRMOR = hCoreState->SPR.HRMOR;
+  const u64 HRMOR = ppuState->SPR.HRMOR;
   // Real Mode Offset Register.
-  u64 RMOR = hCoreState->SPR.RMOR;
+  const u64 RMOR = ppuState->SPR.RMOR;
   // Upper 32 bits of EA, used when getting the VPN.
-  u64 upperEA = (*EA & 0xFFFFFFFF00000000);
+  const u64 upperEA = (*EA & 0xFFFFFFFF00000000);
 
   // On 32-Bit mode of opertaion MSR[SF] = 0, high order 32 bits of the EA
   // are truncated, effectively clearing them.
@@ -655,20 +674,58 @@ bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
 
   // Real Adress, this is what we want.
   u64 RA = 0;
+
+  //
+  // ERAT's
+  //
+
+  // Each ERAT entry holds the EA-to-RA translation for an aligned 4 KB area of memory. When
+  // using a 4 KB page size, each ERAT entry holds the information for exactly one page.When
+  // using large pages, each ERAT entry contains a 4 KB section of the page, meaning that large
+  // pages can occupy several ERAT entries.All EA - to - RA mappings are kept in the ERAT including
+  // both real - mode and virtual - mode addresses(that is, addresses accessed with MSR[IR] equal to
+  // 0 or 1).
+  // TODO:
+  // The ERATs identify each translation entry with some combination of the MSR[SF, IR, DR,
+  // PR, and HV] bits, depending on whether the entry is in the I - ERAT or D - ERAT.This allows the
+  // ERATs to distinguish between translations that are valid for the various modes of operation.
+  // See IBM_CBE_Handbook_v1.1 Page 82.
+
+  // Search ERAT's
+  if (thread.instrFetch) {
+    // iERAT
+    RA = thread.iERAT.getElement((*EA & ~0xFFF));
+    if (RA != -1) {
+      RA |= (*EA & 0xFFF);
+      *EA = RA;
+      return true;
+    }
+  }
+  else {
+    // dERAT
+    RA = thread.dERAT.getElement((*EA & ~0xFFF));
+    if (RA != -1) {
+      RA |= (*EA & 0xFFF);
+      *EA = RA;
+      return true;
+    }
+  }
+
   // Holds whether the cpu thread issuing the fetch is running in Real or
   // Virtual mode. It defaults to Real Mode, as this is how the XCPU starts
-  // all threads.
+  // its threads
   bool realMode = true;
   // If this EA bit is set, then address generated in Real Mode isn't OR'ed
-  // with the contents of HRMOR register.
-  bool eaZeroBit = ((*EA & 0x8000000000000000) >> 63);
-  // LPCR(LPES) bit 1.
-  bool lpcrLPESBit1 = ((LPCR & 0x8) >> 3);
-  // Software management of the TLB. 0 = Hardware, 1 = Software.
-  bool tlbSoftwareManaged = ((LPCR & 0x400) >> 10);
+  // with the contents of HRMOR register
+  const bool eaZeroBit = ((*EA & 0x8000000000000000) >> 63);
+  // LPCR(LPES) bit 1
+  const bool lpcrLPESBit1 = ((LPCR & 0x8) >> 3);
+  // Software management of the TLB
+  // 0 = Hardware, 1 = Software
+  const bool tlbSoftwareManaged = ((LPCR & 0x400) >> 10);
 
   // Instruction relocate and instruction fetch
-  if (_msr.IR && hCoreState->ppuThread[hCoreState->currentThread].iFetch)
+  if (_msr.IR && thread.instrFetch)
     realMode = false;
   // Data fetch
   else if (_msr.DR)
@@ -676,10 +733,10 @@ bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
 
   // Real Addressing Mode
   if (realMode) {
-    // If running in Hypervisor Offset mode.
+    // If running in Hypervisor Offset mode
     if (_msr.HV) {
       if (eaZeroBit) {
-        // Real address is bits 22-63 of Effective Address.
+        // Real address is bits 22-63 of Effective Address
         // RA = EA[22:63]
         RA = (*EA & 0x3FFFFFFFFFF);
       } else {
@@ -695,14 +752,14 @@ bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
         RA = (((*EA & 0x3FFFFF00000) | (RMOR & 0x3FFFFF00000)) |
               (*EA & 0xFFFFF));
       } else {
-        // Mode Fault. LPAR Interrupt.
+        // Mode Fault. LPAR Interrupt
         LOG_CRITICAL(Xenon_MMU, "LPAR Interrupt unimplemented.");
-        system("PAUSE");
       }
     }
-  }
-  // Virtual Mode
-  else {
+  } else {
+    //
+    // Virtual Mode
+    //
     // Page size bits
     u8 p = 0;
     // Large pages
@@ -723,21 +780,30 @@ bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
 
     bool slbHit = false;
     // Search the SLB to get the VSID
-    for (auto &slbEntry :
-         hCoreState->ppuThread[hCoreState->currentThread].SLB) {
-      if (slbEntry.V && (slbEntry.ESID == ESID)) {
-        // Entry valid & SLB->ESID = EA->VSID
-        currslbEntry = slbEntry;
-        VSID = slbEntry.VSID;
-        L = slbEntry.L;
-        LP = slbEntry.LP;
-        slbHit = true;
-        break;
+    for (auto &slbEntry : thread.SLB) {
+      if (slbEntry.V) {
+#ifdef DEBUG_BUILD
+        if (Config::log.advanced)
+          LOG_TRACE(Xenon_MMU, "Checking valid SLB (V:0x{:X},LP:0x{:X},C:0x{:X},L:0x{:X},N:0x{:X},Kp:0x{:X},Ks:0x{:X},VSID:0x{:X},ESID:0x{:X},vsidReg:0x{:X},esidReg:0x{:X})", static_cast<u32>(slbEntry.V), static_cast<u32>(slbEntry.LP), static_cast<u32>(slbEntry.C), static_cast<u32>(slbEntry.L),
+                                static_cast<u32>(slbEntry.N), static_cast<u32>(slbEntry.Kp), static_cast<u32>(slbEntry.Ks),
+                                slbEntry.VSID, slbEntry.ESID, slbEntry.vsidReg, slbEntry.esidReg);
+#endif
+        if (slbEntry.ESID == ESID) {
+#ifdef DEBUG_BUILD
+          if (Config::log.advanced)
+            LOG_TRACE(Xenon_MMU, "SLB Match");
+#endif
+          // Entry valid & SLB->ESID = EA->VSID
+          currslbEntry = slbEntry;
+          VSID = slbEntry.VSID;
+          L = slbEntry.L;
+          LP = slbEntry.LP;
+          slbHit = true;
+          break;
+        }
       }
     }
 
-    // Virtual Page Number
-    u64 VPN = 0;
     // Real Page Number
     u64 RPN = 0;
     // Page
@@ -752,116 +818,97 @@ bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
       //
 
       // 1. Get the p Size
-      p = mmuGetPageSize(hCoreState, L, LP);
+      p = mmuGetPageSize(ppuState, L, LP);
 
       // Get our Virtual Address - 65 bit
       // VSID + 28 bit adress data.
-      u64 VA = VSID | (*EA & 0xFFFFFFF);
+      const u64 VA = VSID | (*EA & 0xFFFFFFF);
       // Page Offset.
-      u64 PAGE = (QGET(*EA, 36, 63 - p) << p);
+      const u64 PAGE = (QGET(*EA, 36, 63 - p) << p);
 
-      if (VA > 0x7FFFFFFF) {
-        VPN = (VA >> 16) & ~0x7F;
-      } else if (VA > 0x20000000) {
-        if (p == 0x18)
-          VPN = (VA >> 16) & ~0xFF;
-        else
-          VPN = (VA >> 16) & ~0x7F;
-      } else {
-        VPN = (VA >> 16) & ~0xF;
-      }
-
-      if (mmuSearchTlbEntry(hCoreState, &RPN, VA, VPN, p, LP)) {
+      // Search the tlb for an entry.
+      if (mmuSearchTlbEntry(ppuState, &RPN, VA, p, L, LP)) {
         // TLB Hit, proceed.
         goto end;
       } else {
         // TLB miss, if we are in software managed mode, generate an
-        // interrupt, else do page table search.
+        // interrupt, else do page table search
         if (tlbSoftwareManaged) {
-          bool hv = hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.HV;
-          bool sfMode =
-              hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.SF;
-          u64 CIA = hCoreState->ppuThread[hCoreState->currentThread].CIA;
-
-          if (hCoreState->ppuThread[hCoreState->currentThread].iFetch) {
-            hCoreState->ppuThread[hCoreState->currentThread].exceptReg |=
-                PPU_EX_INSSTOR;
+          if (thread.instrFetch) {
+            _ex |= PPU_EX_INSSTOR;
           } else {
-
-            hCoreState->ppuThread[hCoreState->currentThread].exceptReg |=
-                PPU_EX_DATASTOR;
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.DAR = *EA;
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.DSISR =
-                DSISR_NOPTE;
+            _ex |= PPU_EX_DATASTOR;
+            thread.SPR.DAR = *EA;
+            thread.SPR.DSISR = DSISR_NOPTE;
           }
           return false;
         } else {
           // Page Table Lookup:
-          // Walk the Page table to find a Page that translates our current VA.
+          // Walk the Page table to find a Page that translates our current VA
+
+          // TODO(bitsh1ft3r): Add TLB Reloading code
 
           // Save MSR DR & IR Bits. When an exception occurs they must be reset
-          // to whatever they where.
-          bool msrDR =
-              hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.DR;
-          bool msrIR =
-              hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.IR;
+          // to whatever they where
+          const bool msrDR = thread.SPR.MSR.DR;
+          const bool msrIR = thread.SPR.MSR.IR;
 
-          // Disable relocation.
-          hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.DR = 0;
-          hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.IR = 0;
+          // Disable relocation
+          thread.SPR.MSR.DR = 0;
+          thread.SPR.MSR.IR = 0;
 
-          // Get the primary and secondary hashes.
+          // Get the primary and secondary hashes
           u64 hash0 = (VSID >> 28) ^ (PAGE >> p);
           u64 hash1 = ~hash0;
 
-          // Get hash table origin and hash table mask.
-          u64 htabOrg = hCoreState->SPR.SDR1 & PPC_SPR_SDR_64_HTABORG;
-          u64 htabSize = hCoreState->SPR.SDR1 & PPC_SPR_SDR_64_HTABSIZE;
+          // Get hash table origin and hash table mask
+          const u64 htabOrg = ppuState->SPR.SDR1 & PPC_SPR_SDR_64_HTABORG;
+          const u64 htabSize = ppuState->SPR.SDR1 & PPC_SPR_SDR_64_HTABSIZE;
 
-          // Create the mask.
+          // Create the mask
           u64 htabMask = QMASK(64 - (11 + htabSize), 63);
 
-          // And both hashes with the created mask.
+          // And both hashes with the created mask
           hash0 = hash0 & htabMask;
           hash1 = hash1 & htabMask;
 
-          // Get both PTEG's addresses.
-          u64 pteg0Addr = htabOrg | (hash0 << 7);
-          u64 pteg1Addr = htabOrg | (hash1 << 7);
+          // Get both PTEG's addresses
+          const u64 pteg0Addr = htabOrg | (hash0 << 7);
+          const u64 pteg1Addr = htabOrg | (hash1 << 7);
 
           /*
           The 16-byte PTEs are organized in memory as groups of eight entries,
           called PTE groups (PTEGs), each one a full 128-byte cache line. A
           hardware table lookup consists of searching a primary PTEG and then,
           if necessary, searching a secondary PTEG to find the correct PTE to be
-          reloaded into the TLB.
+          reloaded into the TLB
           */
 
           // Hardware searches PTEGs in the following order:
-          // 1. Request the even primary PTEG entries.
-          // 2. Search PTE[0], PTE[2], PTE[4], and PTE[6].
-          // 3. Request the odd primary PTEG entries.
-          // 4. Search PTE[1], PTE[3], PTE[5], and PTE[7].
-          // 5. Repeat steps 1 through 4 with the secondary PTE.
-          // 6. If no match occurs, raise a data storage exception.
+          // 1. Request the even primary PTEG entries
+          // 2. Search PTE[0], PTE[2], PTE[4], and PTE[6]
+          // 3. Request the odd primary PTEG entries
+          // 4. Search PTE[1], PTE[3], PTE[5], and PTE[7]
+          // 5. Repeat steps 1 through 4 with the secondary PTE
+          // 6. If no match occurs, raise a data storage exception
 
-          // First PTEG.
+          // First PTEG
           PPC_HPTE64 pteg0[PPC_HPTES_PER_GROUP];
 
-          // Get the pteg data from memory while relocation is off.
+          // Get the pteg data from memory while relocation is off
           for (size_t i = 0; i < PPC_HPTES_PER_GROUP; i++) {
             pteg0[i].pte0 =
-                PPCInterpreter::MMURead64(hCoreState, pteg0Addr + i * 16);
+                PPCInterpreter::MMURead64(ppuState, pteg0Addr + i * 16, thr);
             pteg0[i].pte1 =
-                PPCInterpreter::MMURead64(hCoreState, pteg0Addr + i * 16 + 8);
+                PPCInterpreter::MMURead64(ppuState, pteg0Addr + i * 16 + 8, thr);
           }
 
-          // We compare all pte's in order for simplicity.
+          // We compare all pte's in order for simplicity
           for (size_t i = 0; i < PPC_HPTES_PER_GROUP; i++) {
             /*
                 Conditions for a match to occur:
 
-                * PTE: H = 0 for the primary PTEG, 1 for the secondary PTEG
+                * PTE: H = 0 for the primary PTEG, 1 for the secondary PTEG
                 * PTE: V = 1
                 * PTE: AVPN[0:51] = VA0:51
                 * if p < 28, PTE: AVPN[52:51+q] = VA[52:51+q]
@@ -872,146 +919,88 @@ bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
               continue;
             }
 
-            // V?
-            if ((pteg0[i].pte0 & PPC_HPTE64_VALID) != true) {
+            // Perform the compare
+            if (!mmuComparePTE(VA, 0, pteg0[i].pte0, pteg0[i].pte1, p, L, LP, &RPN)) {
               continue;
             }
 
-            u64 pteAVPN = pteg0[i].pte0 & PPC_HPTE64_AVPN;
+            // Match found. Set relocation back to whatever it was
+            thread.SPR.MSR.DR = msrDR;
+            thread.SPR.MSR.IR = msrIR;
 
-            // PTE:AVPN[0:51] = VA[0:51]?
-            if (((pteAVPN & PPC_HPTE64_AVPN_0_51) >> 12) != (VA >> 28)) {
-              continue;
-            }
-
-            /*
-                The PPE also requires that PTE[LP] = SLBE[LP] whenever PTE[L] =
-               '1'. In other words, the PTE page size must match the SLBE page
-               size exactly for a page-table match to occur.
-            */
-
-            // L?
-            if (((pteg0[i].pte0 & PPC_HPTE64_LARGE) >> 2) != L) {
-              continue;
-            }
-
-            // L & LP?
-            if (L && (((pteg0[i].pte1 & PPC_HPTE64_LP) >> 12) != LP)) {
-              continue;
-            }
-
-            // Match found. Extract the RPN from the page table.
-
-            // Set relocation back to whatever it was.
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.DR = msrDR;
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.IR = msrIR;
-
-            // Update Referenced and Change Bits if necessary.
+            // Update Referenced and Change Bits if necessary
             if (!((pteg0[i].pte1 & PPC_HPTE64_R) >> 8)) {
               // Referenced
-              MMUWrite64(hCoreState, pteg0Addr + i * 16 + 8,
-                         (pteg0[i].pte1 | 0x100));
+              MMUWrite64(ppuState, pteg0Addr + i * 16 + 8,
+                         (pteg0[i].pte1 | 0x100), thr);
             }
             if (!((pteg0[i].pte1 & PPC_HPTE64_C) >> 7)) {
               // Access is a data write?
               if (memWrite) {
                 // Change
-                MMUWrite64(hCoreState, pteg0Addr + i * 16 + 8,
-                           (pteg0[i].pte1 | 0x80));
+                MMUWrite64(ppuState, pteg0Addr + i * 16 + 8,
+                           (pteg0[i].pte1 | 0x80), thr);
               }
-            }
-
-            if (L) {
-              // RPN is PTE[86:114].
-              RPN = pteg0[i].pte1 & PPC_HPTE64_RPN_LP;
-            } else {
-              // RPN is PTE[86:115].
-              RPN = pteg0[i].pte1 & PPC_HPTE64_RPN_NO_LP;
             }
 
             goto end;
           }
 
-          // Second PTEG.
+          // Second PTEG
           PPC_HPTE64 pteg1[PPC_HPTES_PER_GROUP];
 
           for (size_t i = 0; i < PPC_HPTES_PER_GROUP; i++) {
             pteg1[i].pte0 =
-                PPCInterpreter::MMURead64(hCoreState, pteg1Addr + i * 16);
+                PPCInterpreter::MMURead64(ppuState, pteg1Addr + i * 16, thr);
             pteg1[i].pte1 =
-                PPCInterpreter::MMURead64(hCoreState, pteg1Addr + i * 16 + 8);
+                PPCInterpreter::MMURead64(ppuState, pteg1Addr + i * 16 + 8, thr);
           }
 
-          // We compare all pte's in order for simplicity.
+          // We compare all pte's in order for simplicity
           for (size_t i = 0; i < PPC_HPTES_PER_GROUP; i++) {
             /*
                 Conditions for a match to occur:
 
-                * PTE: H = 0 for the primary PTEG, 1 for the secondary PTEG
+                * PTE: H = 0 for the primary PTEG, 1 for the secondary PTEG
                 * PTE: V = 1
                 * PTE: AVPN[0:51] = VA0:51
                 * if p < 28, PTE: AVPN[52:51+q] = VA[52:51+q]
             */
 
             // H = 0?
-            if (((pteg1[i].pte0 & PPC_HPTE64_HASH) >> 1) != 0) {
+            if (((pteg1[i].pte0 & PPC_HPTE64_HASH) >> 1) != 1) {
               continue;
             }
 
-            // V?
-            if ((pteg1[i].pte0 & PPC_HPTE64_VALID) != true) {
+            // Perform the compare
+            if (!mmuComparePTE(VA, 0, pteg1[i].pte0, pteg1[i].pte1, p, L, LP, &RPN)) {
               continue;
             }
 
-            u64 pteAVPN = pteg1[i].pte0 & PPC_HPTE64_AVPN;
+            // Match found. Set relocation back to whatever it was
+            thread.SPR.MSR.DR = msrDR;
+            thread.SPR.MSR.IR = msrIR;
 
-            // PTE:AVPN[0:51] = VA[0:51]?
-            if (((pteAVPN & PPC_HPTE64_AVPN_0_51) >> 12) != (VA >> 28)) {
-              continue;
-            }
-
-            /*
-                The PPE also requires that PTE[LP] = SLBE[LP] whenever PTE[L] =
-               '1'. In other words, the PTE page size must match the SLBE page
-               size exactly for a page-table match to occur.
-            */
-
-            // L?
-            if (((pteg1[i].pte0 & PPC_HPTE64_LARGE) >> 2) != L) {
-              continue;
-            }
-
-            // L & LP?
-            if (L && (((pteg1[i].pte1 & PPC_HPTE64_LP) >> 12) != LP)) {
-              continue;
-            }
-
-            // Match found. Extract the RPN from the page table.
-
-            // Set relocation back to whatever it was.
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.DR = msrDR;
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.IR = msrIR;
-
-            // Update Referenced and Change Bits if necessary.
+            // Update Referenced and Change Bits if necessary
             if (!((pteg1[i].pte1 & PPC_HPTE64_R) >> 8)) {
               // Referenced
-              MMUWrite64(hCoreState, pteg1Addr + i * 16 + 8,
-                         (pteg1[i].pte1 | 0x100));
+              MMUWrite64(ppuState, pteg1Addr + i * 16 + 8,
+                         (pteg1[i].pte1 | 0x100), thr);
             }
             if (!((pteg1[i].pte1 & PPC_HPTE64_C) >> 7)) {
               // Access is a data write?
               if (memWrite) {
                 // Change
-                MMUWrite64(hCoreState, pteg1Addr + i * 16 + 8,
-                           (pteg1[i].pte1 | 0x80));
+                MMUWrite64(ppuState, pteg1Addr + i * 16 + 8,
+                           (pteg1[i].pte1 | 0x80), thr);
               }
             }
 
             if (L) {
-              // RPN is PTE[86:114].
+              // RPN is PTE[86:114]
               RPN = pteg1[i].pte1 & PPC_HPTE64_RPN_LP;
             } else {
-              // RPN is PTE[86:115].
+              // RPN is PTE[86:115]
               RPN = pteg1[i].pte1 & PPC_HPTE64_RPN_NO_LP;
             }
 
@@ -1019,54 +1008,61 @@ bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
           }
 
           // Set MSR to IR/DR mode before raising the interrupt to whatever they
-          // were.
-          hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.DR = msrDR;
-          hCoreState->ppuThread[hCoreState->currentThread].SPR.MSR.IR = msrIR;
+          // were
+          thread.SPR.MSR.DR = msrDR;
+          thread.SPR.MSR.IR = msrIR;
 
-          // Page Table Lookup Fault.
-          // Issue Data/Instr Storage interrupt.
+          // Page Table Lookup Fault
+          // Issue Data/Instr Storage interrupt
 
-          // Instruction read.
-          if (hCoreState->ppuThread[hCoreState->currentThread].iFetch) {
-            hCoreState->ppuThread[hCoreState->currentThread].exceptReg |=
-                PPU_EX_INSSTOR;
+          // Instruction read
+          if (thread.instrFetch) {
+            _ex |= PPU_EX_INSSTOR;
 
           } else if (memWrite) {
-            // Data write.
-            hCoreState->ppuThread[hCoreState->currentThread].exceptReg |=
-                PPU_EX_DATASTOR;
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.DAR = *EA;
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.DSISR =
-                DSISR_NOPTE | DSISR_ISSTORE;
+            // Data write
+            _ex |= PPU_EX_DATASTOR;
+            thread.SPR.DAR = *EA;
+            thread.SPR.DSISR = DSISR_NOPTE | DSISR_ISSTORE;
           } else {
-            // Data read.
-            hCoreState->ppuThread[hCoreState->currentThread].exceptReg |=
-                PPU_EX_DATASTOR;
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.DAR = *EA;
-            hCoreState->ppuThread[hCoreState->currentThread].SPR.DSISR =
-                DSISR_NOPTE;
+            // Data read
+            _ex |= PPU_EX_DATASTOR;
+            thread.SPR.DAR = *EA;
+            thread.SPR.DSISR = DSISR_NOPTE;
           }
           return false;
         }
       }
     } else {
+      // Debug tools
+      if (Config::debug.haltOnSlbMiss && XeMain::GetCPU()) {
+        XeMain::GetCPU()->Halt();
+      }
       // SLB Miss
       // Data or Inst Segment Exception
-      if (hCoreState->ppuThread[hCoreState->currentThread].iFetch) {
-        hCoreState->ppuThread[hCoreState->currentThread].exceptReg |=
-            PPU_EX_INSTSEGM;
+      if (thread.instrFetch) {
+        _ex |= PPU_EX_INSTSEGM;
       } else {
-        hCoreState->ppuThread[hCoreState->currentThread].exceptReg |=
-            PPU_EX_DATASEGM;
-        hCoreState->ppuThread[hCoreState->currentThread].SPR.DAR = *EA;
+        _ex |= PPU_EX_DATASEGM;
+        thread.SPR.DAR = *EA;
       }
       return false;
     }
 
   end:
     RA = (RPN | QGET(*EA, 64 - p, 63));
-    // Real Address 0 - 21 bits are not implemented;
-    QSET(RA, 0, 21, 0)
+    // Real Address 0 - 21 bits are not implemented
+    QSET(RA, 0, 21, 0);
+  }
+
+  // Save in ERAT's
+  if (thread.instrFetch) {
+    // iERAT
+    thread.iERAT.putElement((*EA & ~0xFFF), (RA & ~0xFFF));
+  }
+  else {
+    // dERAT
+    thread.dERAT.putElement((*EA & ~0xFFF), (RA & ~0xFFF));
   }
 
   *EA = RA;
@@ -1074,351 +1070,238 @@ bool PPCInterpreter::MMUTranslateAddress(u64 *EA, PPU_STATE *hCoreState,
 }
 
 // MMU Read Routine, used by the CPU
-u64 PPCInterpreter::MMURead(XENON_CONTEXT *cpuContext, PPU_STATE *ppuState,
-                            u64 EA, s8 byteCount) {
-  u64 data = 0;
-  u64 oldEA = EA;
-
-  if (EA == 0xc000000000022794) {
-    u8 a = 0;
+void PPCInterpreter::MMURead(XENON_CONTEXT* cpuContext, PPU_STATE *ppuState,
+                             u64 EA, u64 byteCount, u8 *outData, ePPUThread thr) {
+  MICROPROFILE_SCOPEI("[Xe::PPCInterpreter]", "MMURead", MP_AUTO);
+  PPU_THREAD_REGISTERS &thread = ppuState->ppuThread[thr != ePPUThread_None ? thr : curThreadId];
+  const u64 oldEA = EA;
+  if (!MMUTranslateAddress(&EA, ppuState, false, thr)) {
+    memset(outData, 0, byteCount);
+    return;
   }
-
-  // Exception ocurred?
-  if (MMUTranslateAddress(&EA, ppuState, false) == false)
-    return 0;
-
   bool socRead = false;
 
   EA = mmuContructEndAddressFromSecEngAddr(EA, &socRead);
 
-  // When the xboxkrnl writes to address 0x7fffxxxx is writing to the IIC
-  // so we use that address here to validate its an soc write.
-  if (((oldEA & 0x000000007fff0000) >> 16) == 0x7FFF) {
+  // When the xboxkrnl writes to address 0x7FFFxxxx is writing to the IIC
+  // so we use that address here to validate its an soc write
+  if (((oldEA & 0x000000007FFF0000ULL) >> 16) == 0x7FFF)
     socRead = true;
+
+  // Debugger halt
+  if (EA && EA == Config::debug.haltOnReadAddress && XeMain::GetCPU()) {
+    XeMain::GetCPU()->Halt(); // Halt the CPU
+    Config::imgui.debugWindow = true; // Open the debugger after halting
   }
 
-  // TODO: Investigate this values FSB_CONFIG_RX_STATE - Needed to Work!
-  if (ppuState->ppuThread[ppuState->currentThread].CIA == 0x1003598) {
-    ppuState->ppuThread[ppuState->currentThread].GPR[0xB] = 0xE;
+  // TODO: Investigate why FSB_CONFIG_RX_STATE needs these values to work
+  switch (thread.CIA) {
+  case 0x1003598ULL: {
+    GPR(11) = 0x0E;
+  } break;
+  case 0x1003644ULL: {
+    GPR(11) = 0x02;
+  } break;
   }
 
-  if (ppuState->ppuThread[ppuState->currentThread].CIA == 0x1003644) {
-    ppuState->ppuThread[ppuState->currentThread].GPR[0xB] = 0x2;
-  }
-
-  // Hack Needed for CB to work, seems like it reads from some SoC this value
-  // and checks againts the fuses.
-  if (socRead && EA == 0x00061000) {
-    data = 0x0000000000000020;
-    return data;
-  }
-
-  // Hack Needed for CB to work, reading ram size to this address, further
-  // research required. Free60.org shows this belongs to BIU address range.
-  if (socRead && EA == 0xe1040000) {
-    data = 0x0000000020000000;
-    return data;
-  }
-
-  // Hardware register address
-  if (socRead && EA == 0x00061008) {
-    data = 0;
-    return data;
-  }
-
-  // SECENG address, CB compares this to 0.
-  // Further research required!
-  if ((socRead && EA == 0x26000) || (socRead && EA == 0x26008)) {
-    data = 0;
-    return data;
-  }
-
-  // Check if reading from Security Engine config block
-  if (socRead && EA >= XE_SECENG_ADDR && EA < XE_SECENG_ADDR + XE_SECENG_SIZE) {
-    u32 secAddr = (u32)(EA - XE_SECENG_ADDR);
-    memcpy(&data, &intXCPUContext->secEngData[secAddr], byteCount);
-    return data;
-  }
-
-  // Random Number Generator
-  if (socRead && EA == 0x00060000) {
-    u64 generatedRandomNumber = rand();
-    memcpy(&data, &generatedRandomNumber, byteCount);
-    return data;
-  }
-
-  // Read is from SROM area:
-  if (socRead && EA >= XE_SROM_ADDR && EA < XE_SROM_ADDR + XE_SROM_SIZE) {
-    u32 sromAddr = static_cast<u32>(EA) - static_cast<u32>(XE_SROM_ADDR);
-    memcpy(&data, &cpuContext->SROM[sromAddr], byteCount);
-    return data;
-  }
-
-  // Read is from SRAM area
-  if (socRead && EA >= XE_SRAM_ADDR && EA < XE_SRAM_ADDR + XE_SRAM_SIZE) {
-    u32 sramAddr = static_cast<u32>(EA) - static_cast<u32>(XE_SRAM_ADDR);
-    memcpy(&data, &cpuContext->SRAM[sramAddr], byteCount);
-    return data;
-  }
-
-  // Check if reading from eFuses section
-  if (socRead && EA >= XE_FUSESET_LOC &&
-      EA <= (XE_FUSESET_LOC + XE_FUSESET_SIZE)) {
-    switch ((u32)EA) {
-    case 0x20000:
-      data = cpuContext->fuseSet.fuseLine00;
-      break;
-    case 0x20200:
-      data = cpuContext->fuseSet.fuseLine01;
-      break;
-    case 0x20400:
-      data = cpuContext->fuseSet.fuseLine02;
-      break;
-    case 0x20600:
-      data = cpuContext->fuseSet.fuseLine03;
-      break;
-    case 0x20800:
-      data = cpuContext->fuseSet.fuseLine04;
-      break;
-    case 0x20a00:
-      data = cpuContext->fuseSet.fuseLine05;
-      break;
-    case 0x20c00:
-      data = cpuContext->fuseSet.fuseLine06;
-      break;
-    case 0x20e00:
-      data = cpuContext->fuseSet.fuseLine07;
-      break;
-    case 0x21000:
-      data = cpuContext->fuseSet.fuseLine08;
-      break;
-    case 0x21200:
-      data = cpuContext->fuseSet.fuseLine09;
-      break;
-    case 0x21400:
-      data = cpuContext->fuseSet.fuseLine10;
-      break;
-    case 0x21600:
-      data = cpuContext->fuseSet.fuseLine11;
-      break;
-    default:
-      LOG_ERROR(Xenon_MMU, "Reading to unknown fuse at address {:#x}", EA);
-      break;
+  // Handle SoC reads
+  if (socRead) {
+    // Check if the read is from the SROM
+    if (EA >= XE_SROM_ADDR && EA < XE_SROM_ADDR + XE_SROM_SIZE) {
+      const u32 sromAddr = static_cast<u32>(EA - XE_SROM_ADDR);
+      memcpy(outData, &cpuContext->SROM[sromAddr], byteCount);
+      return;
     }
-
-    return _byteswap_uint64(data);
-  }
-
-  // Integrated Interrupt Controller in real mode, used when the HV wants to
-  // start a CPUs IC.
-  if (socRead && (EA & ~0xF000) >= XE_IIC_BASE &&
-      (EA & ~0xF000) < XE_IIC_BASE + XE_IIC_SIZE && (EA & 0xFFFFF) < 0x56000) {
-    intXCPUContext->xenonIIC.readInterrupt(EA, &data);
-    return data;
-  }
-
-  // Time Base register. Writing here starts or stops the RTC apparently.
-  if (socRead && EA == 0x611a0) {
-    if (!intXCPUContext->timeBaseActive) {
-      data = 0;
-      return data;
-    } else {
-      data = 0x0001000000000000;
-      return data;
+    // Check if the read is from SRAM
+    else if (EA >= XE_SRAM_ADDR && EA < XE_SRAM_ADDR + XE_SRAM_SIZE) {
+      const u32 sramAddr = static_cast<u32>(EA - XE_SRAM_ADDR);
+      memcpy(outData, &cpuContext->SRAM[sramAddr], byteCount);
+      return;
+    }
+    // Integrated Interrupt Controller in real mode, used when the HV wants to
+    // start a CPUs IC
+    else if ((EA & ~0xF000ULL) >= XE_IIC_BASE &&
+      (EA & ~0xF000ULL) < XE_IIC_BASE + XE_IIC_SIZE &&
+      (EA & 0xFFFFF) < 0x56000) {
+      cpuContext->xenonIIC.readInterrupt(EA, outData, byteCount);
+      return;
+    }
+    // Try to handle the SoC read, may belong to one of the CPU SoC blocks.
+    else if (cpuContext->HandleSOCRead(EA, outData, byteCount)) {
+      return;
     }
   }
 
-  // CPU VID Register
-  if (socRead && EA == 0x61188) {
-    data = 0x382c00000000b001;
-    return _byteswap_uint64(data);
+  // External read
+  if (!sysBus->Read(EA, outData, byteCount, socRead) && socRead) {
+    if (Config::log.advanced)
+      LOG_WARNING(Xenon_MMU, "Invalid SoC Read from 0x{:X}", EA);
   }
-
-  bool nand = false;
-  bool pciConfigSpace = false;
-  bool pciBridge = false;
-  bool xGPU = false;
-
-  if (EA >= 0xC8000000 && EA <= 0xCC000000) {
-    nand = true;
-  }
-
-  if (EA >= 0xD0000000 && EA <= 0xD1000000) {
-    pciConfigSpace = true;
-  }
-
-  if (EA >= 0xEA000000 && EA <= 0xEA010000) {
-    pciBridge = true;
-  }
-
-  if (EA >= 0xEC800000 && EA <= 0xEC810000) {
-      xGPU = true;
-  }
-
-  if (socRead && nand != true && pciBridge != true && pciConfigSpace != true && xGPU != true) {
-      LOG_WARNING(Xenon_MMU, "SoC Read from {:#x}, returning 0.", EA);
-    data = 0;
-    return data;
-  }
-
-  if (EA == 0x22794) {
-    u8 a = 0;
-  }
-
-  // External Read
-  sysBus->Read(EA, &data, byteCount);
-  return data;
 }
 
 // MMU Write Routine, used by the CPU
 void PPCInterpreter::MMUWrite(XENON_CONTEXT *cpuContext, PPU_STATE *ppuState,
-                              u64 data, u64 EA, s8 byteCount, bool cacheStore) {
-  u64 oldEA = EA;
-  if (MMUTranslateAddress(&EA, ppuState, true) == false)
+                              const u8 *data, u64 EA, u64 byteCount, ePPUThread thr) {
+  MICROPROFILE_SCOPEI("[Xe::PPCInterpreter]", "MMUWrite", MP_AUTO);
+  const u64 oldEA = EA;
+
+  if (!MMUTranslateAddress(&EA, ppuState, true, thr))
     return;
 
-  if (oldEA >= 0x9e000000 && oldEA <= 0x9eFFFFFF) {
-    u8 a = 0;
-  }
+  // Check if it's reserved
+  cpuContext->xenonRes.Check(EA);
 
   bool socWrite = false;
 
   EA = mmuContructEndAddressFromSecEngAddr(EA, &socWrite);
 
-  // When the xboxkrnl writes to address 0x7fffxxxx is writing to the IIC
-  // so we use that address here to validate its an soc write.
-  if (((oldEA & 0x000000007fff0000) >> 16) == 0x7FFF) {
+  // When the xboxkrnl writes to address 0x7FFFxxxx is writing to the IIC
+  // so we use that address here to validate its an soc write
+  if (((oldEA & 0x000000007FFFF0000ULL) >> 16) == 0x7FFF)
     socWrite = true;
+
+  // Debugger halt
+  if (EA && EA == Config::debug.haltOnWriteAddress && XeMain::GetCPU()) {
+    XeMain::GetCPU()->Halt(); // Halt the CPU
+    Config::imgui.debugWindow = true; // Open the debugger after halting
   }
 
-  // CPU POST Bus
-  if (socWrite && EA == POST_BUS_ADDR) {
-    Xe::XCPU::POSTBUS::POST(data);
-    return;
-  }
-
-  // Time Base register. Writing here starts or stops the RTC apparently.
-  if (socWrite && EA == 0x611a0) {
-    if (data == 0) {
-      intXCPUContext->timeBaseActive = false;
+  if (socWrite) {
+    // Check if writing to SROM region.
+    if (EA >= XE_SROM_ADDR && EA < XE_SROM_ADDR + XE_SROM_SIZE) {
+      LOG_ERROR(Xenon_MMU, "Tried to write to XCPU SROM!");
       return;
-    } else if (data == 0xff01000000000000 ||
-               data == 0x0001000000000000) // 0x1FF byte reversed!
-    {
-      intXCPUContext->timeBaseActive = true;
+    }
+    // Check if writing to internal SRAM.
+    else if (EA >= XE_SRAM_ADDR && EA < XE_SRAM_ADDR + XE_SRAM_SIZE) {
+      u32 sramAddr = static_cast<u32>(EA - XE_SRAM_ADDR);
+      memcpy(&cpuContext->SRAM[sramAddr], data, byteCount);
+      return;
+    }
+    // Integrated Interrupt Controller in real mode, used when the HV wants to
+    // start a CPUs IC.
+    else if ((EA & ~0xF000) >= XE_IIC_BASE &&
+      (EA & ~0xF000) < XE_IIC_BASE + XE_IIC_SIZE &&
+      (EA & 0xFFFFF) < 0x560FF) {
+      cpuContext->xenonIIC.writeInterrupt(EA, data, byteCount);
+      return;
+    }
+    // Try to handle the SoC write, may belong to one of the CPU SoC blocks.
+    else if (cpuContext->HandleSOCWrite(EA, data, byteCount)) {
       return;
     }
   }
 
-  // CPU VID Register
-  if (socWrite && EA == 0x61188) {
-    if (data != 0) {
-      LOG_WARNING(Xenon, "(SOC): New VID value being set: {:#x}", data);
-    }
-    return;
+  // External write
+  if (!sysBus->Write(EA, data, byteCount, socWrite) && socWrite) {
+    u64 tmp = 0;
+    memcpy(&tmp, data, byteCount);
+    if (Config::log.advanced)
+      LOG_WARNING(Xenon_MMU, "Invalid SoC Write to 0x{:X}", EA);
   }
-
-  // Check if writing to bootloader section
-  if (socWrite && EA >= XE_SROM_ADDR && EA < XE_SROM_ADDR + XE_SROM_SIZE) {
-     LOG_ERROR(Xenon_MMU, "Tried to write to XCPU SROM!");
-    return;
-  }
-
-  // Check if writing to internal SRAM
-  if (socWrite && EA >= XE_SRAM_ADDR && EA < XE_SRAM_ADDR + XE_SRAM_SIZE) {
-    u32 sramAddr = (u32)(EA - XE_SRAM_ADDR);
-    memcpy(&cpuContext->SRAM[sramAddr], &data, byteCount);
-    return;
-  }
-
-  // Check if writing to Security Engine Config Block
-  if (socWrite && EA >= XE_SECENG_ADDR &&
-      EA < XE_SECENG_ADDR + XE_SECENG_SIZE) {
-    u32 secAddr = (u32)(EA - XE_SECENG_ADDR);
-    memcpy(&intXCPUContext->secEngData[secAddr], &data, byteCount);
-    return;
-  }
-
-  // Integrated Interrupt Controller in real mode, used when the HV wants to
-  // start a CPUs IC.
-  if (socWrite && (EA & ~0xF000) >= XE_IIC_BASE &&
-      (EA & ~0xF000) < XE_IIC_BASE + XE_IIC_SIZE && (EA & 0xFFFFF) < 0x560FF) {
-    intXCPUContext->xenonIIC.writeInterrupt(EA, data);
-    return;
-  }
-
-  bool nand = false;
-  bool pciConfigSpace = false;
-  bool pciBridge = false;
-  bool xGPU = false;
-
-  if (EA >= 0xC8000000 && EA <= 0xCC000000) {
-    nand = true;
-  }
-
-  if (EA >= 0xD0000000 && EA <= 0xD1000000) {
-    pciConfigSpace = true;
-  }
-
-  if (EA >= 0xEA000000 && EA <= 0xEA010000) {
-    pciBridge = true;
-  }
-
-  if (EA >= 0xEC800000 && EA <= 0xEC810000) {
-      xGPU = true;
-  }
-
-  if (socWrite && nand != true && pciBridge != true && pciConfigSpace != true && xGPU != true) {
-    LOG_WARNING(Xenon_MMU, "SoC Write to {:#x}, data = {:#x}, invalidating.", EA, data);
-    return;
-  }
-
-  // External Write
-  sysBus->Write(EA, data, byteCount);
-
-  intXCPUContext->xenonRes.Check(EA);
 }
 
-// Reads 1 Byte of memory.
-u8 PPCInterpreter::MMURead8(PPU_STATE *ppuState, u64 EA) {
+void PPCInterpreter::MMUMemCpyFromHost(PPU_STATE *ppuState,
+                                       u64 EA, const void *source, u64 size, ePPUThread thr) {
+  MMUWrite(CPUContext, ppuState, reinterpret_cast<const u8*>(source), EA, size);
+}
+
+void PPCInterpreter::MMUMemCpy(PPU_STATE *ppuState,
+                               u64 EA, u32 source, u64 size, ePPUThread thr) {
+  std::unique_ptr<u8[]> data = std::make_unique<STRIP_UNIQUE_ARR(data)>(size);
+  MMURead(CPUContext, ppuState, source, size, data.get(), thr);
+  MMUWrite(CPUContext, ppuState, data.get(), EA, size, thr);
+  data.reset();
+}
+
+void PPCInterpreter::MMUMemSet(PPU_STATE *ppuState,
+                               u64 EA, s32 data, u64 size, ePPUThread thr) {
+  const u64 oldEA = EA;
+
+  if (MMUTranslateAddress(&EA, ppuState, true, thr) == false)
+    return;
+
+  if (!CPUContext)
+    return;
+
+  // Check if it's reserved
+  CPUContext->xenonRes.Check(EA);
+
+  bool socWrite = false;
+
+  EA = mmuContructEndAddressFromSecEngAddr(EA, &socWrite);
+  // When the xboxkrnl writes to address 0x7FFFxxxx is writing to the IIC
+  // so we use that address here to validate its an soc write
+  if (((oldEA & 0x000000007FFFF0000ULL) >> 16) == 0x7FFF)
+    socWrite = true;
+  if (socWrite) {
+    switch (EA) {
+    default: {
+      // Check if writing to bootloader section
+      if (EA >= XE_SROM_ADDR && EA < XE_SROM_ADDR + XE_SROM_SIZE) {
+        LOG_ERROR(Xenon_MMU, "Tried to write to XCPU SROM!");
+        return;
+      }
+      // Check if writing to internal SRAM
+      else if (EA >= XE_SRAM_ADDR && EA < XE_SRAM_ADDR + XE_SRAM_SIZE) {
+        const u32 sramAddr = static_cast<u32>(EA - XE_SRAM_ADDR);
+        memset(&CPUContext->SRAM[sramAddr], data, size);
+        return;
+      }
+      // Check if writing to Security Engine Config Block
+      else if (EA >= XE_SOCSECENG_BLOCK_START && EA < XE_SOCSECENG_BLOCK_START + XE_SOCSECENG_BLOCK_SIZE) {
+        const u32 secEngOffset = static_cast<u32>(EA - XE_SOCSECENG_BLOCK_START);
+        memset(reinterpret_cast<u8*>(CPUContext->socSecEngBlock.get()) + secEngOffset, 0, size);
+        return;
+      }
+    } break;
+    }
+  }
+
+  // External MemSet
+  sysBus->MemSet(EA, data, size);
+}
+
+// Reads 1 byte of memory
+u8 PPCInterpreter::MMURead8(PPU_STATE *ppuState, u64 EA, ePPUThread thr) {
   u8 data = 0;
-  data = static_cast<u8>(MMURead(intXCPUContext, ppuState, EA, 1));
+  MMURead(CPUContext, ppuState, EA, sizeof(data), reinterpret_cast<u8*>(&data), thr);
   return data;
 }
-// Reads 2 Bytes of memory.
-u16 PPCInterpreter::MMURead16(PPU_STATE *ppuState, u64 EA) {
+// Reads 2 bytes of memory
+u16 PPCInterpreter::MMURead16(PPU_STATE *ppuState, u64 EA, ePPUThread thr) {
   u16 data = 0;
-  data = static_cast<u16>(MMURead(intXCPUContext, ppuState, EA, 2));
-  return _byteswap_ushort(data);
+  MMURead(CPUContext, ppuState, EA, sizeof(data), reinterpret_cast<u8*>(&data), thr);
+  return byteswap_be<u16>(data);
 }
-// Reads 4 Bytes of memory.
-u32 PPCInterpreter::MMURead32(PPU_STATE *ppuState, u64 EA) {
+// Reads 4 bytes of memory
+u32 PPCInterpreter::MMURead32(PPU_STATE *ppuState, u64 EA, ePPUThread thr) {
   u32 data = 0;
-  data = static_cast<u32>(MMURead(intXCPUContext, ppuState, EA, 4));
-  return _byteswap_ulong(data);
+  MMURead(CPUContext, ppuState, EA, sizeof(data), reinterpret_cast<u8*>(&data), thr);
+  return byteswap_be<u32>(data);
 }
-// Reads 8 Bytes of memory.
-u64 PPCInterpreter::MMURead64(PPU_STATE *ppuState, u64 EA) {
+// Reads 8 bytes of memory
+u64 PPCInterpreter::MMURead64(PPU_STATE *ppuState, u64 EA, ePPUThread thr) {
   u64 data = 0;
-  data = MMURead(intXCPUContext, ppuState, EA, 8);
-  return _byteswap_uint64(data);
+  MMURead(CPUContext, ppuState, EA, sizeof(data), reinterpret_cast<u8*>(&data), thr);
+  return byteswap_be<u64>(data);
 }
-// Writes 1 Byte to memory.
-void PPCInterpreter::MMUWrite8(PPU_STATE *ppuState, u64 EA, u8 data) {
-  MMUWrite(intXCPUContext, ppuState, data, EA, 1);
+// Writes 1 byte to memory
+void PPCInterpreter::MMUWrite8(PPU_STATE *ppuState, u64 EA, u8 data, ePPUThread thr) {
+  MMUWrite(CPUContext, ppuState, reinterpret_cast<const u8*>(&data), EA, sizeof(data), thr);
 }
-// Writes 2 Bytes to memory.
-void PPCInterpreter::MMUWrite16(PPU_STATE *ppuState, u64 EA, u16 data) {
-  u16 dataBS = _byteswap_ushort(data);
-  MMUWrite(intXCPUContext, ppuState, dataBS, EA, 2);
+// Writes 2 bytes to memory
+void PPCInterpreter::MMUWrite16(PPU_STATE *ppuState, u64 EA, u16 data, ePPUThread thr) {
+  const u16 dataBS = byteswap_be<u16>(data);
+  MMUWrite(CPUContext, ppuState, reinterpret_cast<const u8*>(&dataBS), EA, sizeof(data), thr);
 }
-// Writes 4 Bytes to memory.
-void PPCInterpreter::MMUWrite32(PPU_STATE *ppuState, u64 EA, u32 data) {
-  u32 dataBS = _byteswap_ulong(data);
-  MMUWrite(intXCPUContext, ppuState, dataBS, EA, 4);
+// Writes 4 bytes to memory
+void PPCInterpreter::MMUWrite32(PPU_STATE *ppuState, u64 EA, u32 data, ePPUThread thr) {
+  const u32 dataBS = byteswap_be<u32>(data);
+  MMUWrite(CPUContext, ppuState, reinterpret_cast<const u8*>(&dataBS), EA, sizeof(data), thr);
 }
-// Writes 8 Bytes to memory.
-void PPCInterpreter::MMUWrite64(PPU_STATE *ppuState, u64 EA, u64 data) {
-  u64 dataBS = _byteswap_uint64(data);
-  MMUWrite(intXCPUContext, ppuState, dataBS, EA, 8);
+// Writes 8 bytes to memory
+void PPCInterpreter::MMUWrite64(PPU_STATE *ppuState, u64 EA, u64 data, ePPUThread thr) {
+  const u64 dataBS = byteswap_be<u64>(data);
+  MMUWrite(CPUContext, ppuState, reinterpret_cast<const u8*>(&dataBS), EA, sizeof(data), thr);
 }

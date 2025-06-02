@@ -1,31 +1,31 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #include "XenonReservations.h"
 
 XenonReservations::XenonReservations() {
-  nReservations = 0;
-  nProcessors = 0;
-  Reservations[0] = nullptr;
+  std::lock_guard lock(reservationLock);
+  numReservations = 0;
+  processors = 0;
+  reservations[0] = nullptr;
 }
 
 bool XenonReservations::Register(PPU_RES *Res) {
-  AcquireLock();
-  Reservations[nProcessors] = Res;
-  nProcessors++;
-  ReleaseLock();
+  std::lock_guard lock(reservationLock);
+  reservations[processors] = Res;
+  processors++;
   return true;
 }
 
 void XenonReservations::Scan(u64 PhysAddress) {
-  PhysAddress &= ~3;
+  std::lock_guard lock(reservationLock);
+  // Address must be aligned.
+  PhysAddress &= ~7;
 
-  AcquireLock();
-  for (int i = 0; i < nProcessors; i++) {
+  for (int i = 0; i < processors; i++) {
     // NB: order of checks matters!
-    if ((Reservations[i]->V) && PhysAddress >= Reservations[i]->resAddr) {
-      Reservations[i]->V = false;
-      Decrement();
+    if (reservations[i]->valid && PhysAddress >= reservations[i]->reservedAddr) {
+      reservations[i]->valid = false;
+      numReservations--;
     }
   }
-  ReleaseLock();
 }

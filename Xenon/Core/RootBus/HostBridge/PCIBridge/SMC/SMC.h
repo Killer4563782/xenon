@@ -1,28 +1,36 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
 
+#ifdef _WIN32
 #include <Windows.h>
+#endif
+#include <condition_variable>
+#include <thread>
+
+#include "Base/Global.h"
 
 #include "Core/RootBus/HostBridge/PCIBridge/PCIBridge.h"
 #include "Core/RootBus/HostBridge/PCIBridge/PCIDevice.h"
 
-/*
-        Xenon System Management Controller (SMC) Emulation.
+#include "Core/XCPU/UART.h"
 
-        * The SMC is an Intel 8051 microcontroller inside the Southbridge, it
+/*
+  Xenon System Management Controller (SMC) Emulation:
+
+   The SMC is an Intel 8051 microcontroller inside the Southbridge, it
    handles low-level system tasks, such as the Power On Reset sequence, UART,
    Clock, DVD tray state, Tilt Status, IR Receiver, Temps, etc...
 
-        Since emulating an 8051 core is just adding overhead to the emulator as
-   of now i'm chosing just to do HLE for this.
+   Since emulating an 8051 core is just adding overhead to the emulator as
+   of now I'm chosing just to do HLE for this.
 */
 
 #define SMC_DEV_SIZE 0x100
 
 namespace Xe {
 namespace PCIDev {
-namespace SMC {
+
 // FIFO Queue Querys/Commands
 enum SMC_FIFO_CMD {
   SMC_PWRON_TYPE = 0x1,
@@ -45,8 +53,8 @@ enum SMC_FIFO_CMD {
   SMC_SET_POWER_LED = 0x8C,
   SMC_SET_AUDIO_MUTE = 0x8D,
   SMC_ARGON_RELATED = 0x90,
-  SMC_SET_FAN_SPEED_GPU =
-      0x94, // Not present on Slims, not used/respected on newer fat.
+  // Not present on Slims, not used/respected on newer fat
+  SMC_SET_FAN_SPEED_GPU = 0x94,
   SMC_SET_IR_ADDRESS = 0x95,
   SMC_SET_DVD_TRAY_SECURE = 0x98,
   SMC_SET_FP_LEDS = 0x99,
@@ -61,7 +69,7 @@ enum SMC_FIFO_CMD {
 enum SMC_TRAY_STATE {
   SMC_TRAY_OPEN = 0x60,
   SMC_TRAY_OPEN_REQUEST = 0x61,
-  SMC_TRAY_CLOSE = 0x62,
+  SMC_TRAY_CLOSED = 0x62,
   SMC_TRAY_OPENING = 0x63,
   SMC_TRAY_CLOSING = 0x64,
   SMC_TRAY_UNKNOWN = 0x65,
@@ -69,41 +77,30 @@ enum SMC_TRAY_STATE {
 };
 
 // SMC Power On Reason
-enum SMC_PWR_REAS {
-  SMC_PWR_REAS_PWRBTN = 0x11, // XSS 5 Power Button Pressed.
-  SMC_PWR_REAS_EJECT = 0x12,  // XSS 6 eject button pushed
-  SMC_PWR_REAS_ALARM = 0x15,  // XSS guess ~ should be the wake alarm ~
-  SMC_PWR_REAS_REMOPWR =
-      0x20, // XSS 2 power button on 3rd party remote/xbox universal remote
-  SMC_PWR_REAS_REMOEJC = 0x21, // Eject button on xbox universal remote
-  SMC_PWR_REAS_REMOX = 0x22,   // XSS 3 Xbox universal media remote X button
-  SMC_PWR_REAS_WINBTN = 0x24,  // XSS 4 Windows button pushed IR remote
-  SMC_PWR_REAS_RESET =
-      0x30, // XSS HalReturnToFirmware(1 or 2 or 3) = hard reset by smc
-  SMC_PWR_REAS_RECHARGE_RESET =
-      0x31,                  // After leaving pnc charge mode via power button
-  SMC_PWR_REAS_KIOSK = 0x41, // XSS 7 console powered on by kiosk pin
-  SMC_PWR_REAS_WIRELESS =
-      0x55, // XSS 8 wireless controller middle button/start button pushed to
-            // power on controller and console
-  SMC_PWR_REAS_WIRED_F1 = 0x56, // XSS 9 wired guide button; fat front top USB
-                                // port, slim front left USB port
-  SMC_PWR_REAS_WIRED_F2 = 0x57, // XSS A wired guide button; fat front botton
-                                // USB port, slim front right USB port
-  SMC_PWR_REAS_WIRED_R2 =
-      0x58, // XSS B wired guide button; slim back middle USB port
-  SMC_PWR_REAS_WIRED_R3 =
-      0x59, // XSS C wired guide button; slim back top USB port
-  SMC_PWR_REAS_WIRED_R1 = 0x5A // XSS D wired guide button; fat back USB port,
-                               // slim back bottom USB port
-                               //
+enum SMC_PWR_REASON {
+  SMC_PWR_REASON_PWRBTN =         0x11,  // XSS 5 Power button pressed
+  SMC_PWR_REASON_EJECT =          0x12,  // XSS 6 Eject button pressed
+  SMC_PWR_REASON_ALARM =          0x15,  // XSS guess ~ should be the wake alarm ~
+  SMC_PWR_REASON_REMOPWR =        0x20,  // XSS 2 power button on 3rd party remote/xbox universal remote
+  SMC_PWR_REASON_REMOEJC =        0x21,  // Eject button on xbox universal remote
+  SMC_PWR_REASON_REMOX =          0x22,  // XSS 3 Xbox universal media remote X button
+  SMC_PWR_REASON_WINBTN =         0x24,  // XSS 4 Windows button pushed IR remote
+  SMC_PWR_REASON_RESET =          0x30,  // XSS HalReturnToFirmware(1 or 2 or 3) = hard reset by smc
+  SMC_PWR_REASON_RECHARGE_RESET = 0x31,  // After leaving pnc charge mode via power button
+  SMC_PWR_REASON_KIOSK =          0x41,  // XSS 7 console powered on by kiosk pin
+  SMC_PWR_REASON_WIRELESS =       0x55,  // XSS 8 wireless controller middle button/start button pushed to power on controller and console
+  SMC_PWR_REASON_WIRED_F1 =       0x56,  // XSS 9 wired guide button; fat front top USB port, slim front left USB port
+  SMC_PWR_REASON_WIRED_F2 =       0x57,  // XSS A wired guide button; fat front botton USB port, slim front right USB port
+  SMC_PWR_REASON_WIRED_R2 =       0x58,  // XSS B wired guide button; slim back middle USB port
+  SMC_PWR_REASON_WIRED_R3 =       0x59, //  XSS C wired guide button; slim back top USB port
+  SMC_PWR_REASON_WIRED_R1 =       0x5A //  XSS D wired guide button; fat back USB port, slim back bottom USB port
   // Possibles/reboot reasons  0x23, 0x2A, 0x42, 0x61, 0x64.
-  // slim with wired controller when horozontal, 3 back usb ports top to bottom
+  // slim with wired controller when horizontal, 3 back usb ports top to bottom
   // 0x59, 0x58, 0x5A front left 0x56, right 0x57. slim with wireless controller
-  // w/pnc when horozontal, 3 back usb ports top to bottom 0x55, 0x58, 0x5A
-  // front left 0x56, right 0x57. fat with wired controller when horozontal, 1
+  // w/pnc when horizontal, 3 back usb ports top to bottom 0x55, 0x58, 0x5A
+  // front left 0x56, right 0x57. fat with wired controller when horizontal, 1
   // back usb port 0x5A front top 0x56, bottom 0x57 fat with wireless controller
-  // w/pnc when horozontal, 1 back usb port 0x5A front top 0x56, bottom 0x57
+  // w/pnc when horizontal, 1 back usb port 0x5A front top 0x56, bottom 0x57
   // Using Microsoft Wireless Controller: 0x55
   // Using Madcatz Wireless Keyboard (Rockband 3 Keyboard - Item Number 98161):
   // 0x55 Using Activision Wireless Turntable Controller (DJ Hero Turntable):
@@ -111,7 +108,7 @@ enum SMC_PWR_REAS {
   // 0x55 Using Guitar controller from Activision Guitar Hero 5: 0x55
 };
 
-// AVPACK's Taken from libXenon.
+// AVPACK's Taken from LibXenon
 enum SMC_AVPACK_TYPE {
   HDMI_AUDIO = 0x13,                 // HDMI_AUDIO
   HDMI_AUDIO_0x14 = 0x14,            // HDMI_AUDIO - GHETTO MOD
@@ -132,13 +129,13 @@ enum SMC_AVPACK_TYPE {
 
 // We handle two states:
 // 1. The SMC PCI State (SMC_PCI_STATE): This is what the system sees/has R/W
-// access trough the PCI Bus.
+// access trough the PCI Bus
 // 2. The Inner State (SMC_CORE_STATE): tracking config settings like DVD Tray
 // State, Current temps, Tilt status, etc...
 
-// SMC PCI State: 255 Bytes long.
+// SMC PCI State: 255 Bytes long
 // There are some registers known, and some that aren't atm, so we'll be adding
-// those later on.
+// those later on
 struct SMC_PCI_STATE {
   u32 busControl;
   u32 reg04;
@@ -214,65 +211,72 @@ struct SMC_PCI_STATE {
   u32 regFC;
 };
 
-// SMC Core State, tracks current state of the system as per view from the SMC.
+// SMC Core State, tracks current state of the system as per view from the SMC
 struct SMC_CORE_STATE {
-  SMC_TRAY_STATE currTrayState;
-  SMC_PWR_REAS currPowerOnReas;
-  SMC_AVPACK_TYPE currAVPackType;
+  SMC_TRAY_STATE currTrayState = {};
+  SMC_PWR_REASON currPowerOnReason = {};
+  SMC_AVPACK_TYPE currAVPackType = {};
 
   // FIFO Data Queue (16 Bytes transmitted in 4 32 Bit words)
-  u8 fifoDataBuffer[16];
+  u8 fifoDataBuffer[16] = {};
   u8 fifoBufferPos = 0;
 
-  // Default COM Port for opening.
-  LPCSTR currentCOMPort;
-  // UART Initialized.
-  bool uartInitialized;
-  // UART Present. Used to do a one time check on UART COM Port on the host
-  // system.
-  bool uartPresent;
-  // Current COM Port Device Control Block.
-  // See
-  // https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-dcb
-  DCB comPortDCB;
-  // Current COM Port Handle.
-  HANDLE comPortHandle;
-  // Current COM Port Status.
-  COMSTAT comPortStat = {};
-  // Current COM Port error register used by ClearCommErr().
-  DWORD comPortError = 0;
-  // Bytes Written to the COM Port.
-  DWORD currentBytesWrittenCount = 0;
-  // Bytes Read from the COM Port.
-  DWORD currentBytesReadCount = 0;
-  // Read/Write Return Status Values
-  bool retVal = false;
+  // UART system
+  u32 currentUARTSystem = {};
+  // vCOM Port
+  std::string currentCOMPort = {};
+  // Socket IP
+  std::string socketIp = {};
+  // Socket Port
+  u16 socketPort = 0;
+  // UART handle
+  std::unique_ptr<HW_UART> uartHandle = {};
 };
 
 // SMC Core Object.
-class SMCCore : public PCIDevice {
+class SMC : public PCIDevice {
 public:
-  SMCCore(PCIBridge *parentPCIBridge, SMC_CORE_STATE *newSMCCoreState);
-  ~SMCCore();
+  SMC(const std::string &deviceName, u64 size,
+    PCIBridge *parentPCIBridge);
+  ~SMC();
 
-  // Read/Write functions.
-  void Read(u64 readAddress, u64 *data, u8 byteCount) override;
-  void ConfigRead(u64 readAddress, u64 *data, u8 byteCount) override;
-  void Write(u64 writeAddress, u64 data, u8 byteCount) override;
-  void ConfigWrite(u64 writeAddress, u64 data, u8 byteCount) override;
+  // Read/Write functions
+  void Read(u64 readAddress, u8 *data, u64 size) override;
+  void Write(u64 writeAddress, const u8 *data, u64 size) override;
+  void MemSet(u64 writeAddress, s32 data, u64 size) override;
+  void ConfigRead(u64 readAddress, u8* data, u64 size) override;
+  void ConfigWrite(u64 writeAddress, const u8* data, u64 size) override;
 
+  void SetPowerOnReason(const SMC_PWR_REASON &reason) {
+    smcCoreState.currPowerOnReason = reason;
+  }
+  const SMC_PWR_REASON GetPowerOnReason() {
+    return smcCoreState.currPowerOnReason;
+  }
 private:
-  // Parent PCI Bridge (Used for interrupts/communication):
+  // Mutex, stops other threads from writing to values without the previous one finishing
+  std::recursive_mutex mutex;
+
+  // Parent PCI Bridge (used for interrupts/communication)
   PCIBridge *pciBridge;
 
-  // SMC PCI State, tracking all communcation with the system.
-  SMC_PCI_STATE *smcPCIState;
+  // SMC PCI State, tracking all communication with the system
+  SMC_PCI_STATE smcPCIState;
 
-  // SMC Core State, tracking all general system status.
-  SMC_CORE_STATE *smcCoreState;
+  // SMC Core State, tracking all general system status
+  SMC_CORE_STATE smcCoreState;
 
   // SMC Thread object
   std::thread smcThread;
+
+  // SMC Thread running state
+  volatile bool smcThreadRunning = true;
+
+  // UART Thread object
+  std::thread uartThread;
+
+  // UART Receive Thread object
+  std::thread uartSecondaryThread;
 
   // SMC Main Thread
   void smcMainThread();
@@ -280,6 +284,6 @@ private:
   // UART/COM Port Setup
   void setupUART(u32 uartConfig);
 };
-} // namespace SMC
+
 } // namespace PCIDev
 } // namespace Xe

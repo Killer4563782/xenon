@@ -231,6 +231,9 @@ _pkginfo.txt
 # but keep track of directories ending in .cache
 !?*.[Cc]ache/
 
+# Visual Studio CMake Debug Cache
+enc_temp_folder/
+
 # Others
 ClientBin/
 ~$*
@@ -427,5 +430,12 @@ Xenon.dir/
 Xenon.dir/*
 /Xenon/x64/*
 /Xenon/Debug/*
-/enc_temp_folder/619a1d34cec9f4ba9f9d74313f867f/PPC_MMU.cpp
-/enc_temp_folder/64f566682068ff61e483a023a729d37b/SFCX.cpp
+/Tools/Tools/*
+Tools/AST/Deps/ThirdParty/glad
+Tools/AST/Deps/ThirdParty/SDL3
+Tools/AST/Deps/ThirdParty/Sirit
+result
+files
+# Specific to Xenon tooling
+Tools/AST/Deps/ThirdParty/Sirit/*
+.direnv/*

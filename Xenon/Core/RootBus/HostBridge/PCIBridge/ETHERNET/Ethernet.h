@@ -1,4 +1,4 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 //
 // Xenon Fast Ethernet Adapter Emulation
@@ -6,13 +6,21 @@
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <unordered_map>
+
+#include "Core/RAM/RAM.h"
+#include "Core/RootBus/HostBridge/PCIBridge/PCIBridge.h"
 #include "Core/RootBus/HostBridge/PCIBridge/PCIDevice.h"
 
 #define ETHERNET_DEV_SIZE 0x80
 
 namespace Xe {
 namespace PCIDev {
-namespace ETHERNET {
 
 // Register Set and offsets.
 // Taken from Linux kernel patches for the Xbox 360.
@@ -39,38 +47,76 @@ enum XE_ETH_REGISTERS {
 
 // Xenon Fast Ethernet PCI Device State struct.
 struct XE_PCI_STATE {
+  // Transmission
   u32 txConfigReg;
   u32 txDescriptorBaseReg;
   u32 txDescriptorStatusReg;
+
+  // Reception
   u32 rxConfigReg;
   u32 rxDescriptorBaseReg;
+
+  // Interrupts
   u32 interruptStatusReg;
   u32 interruptMaskReg;
+
+  // Configuration and power
   u32 config0Reg;
   u32 powerReg;
   u32 phyConfigReg;
   u32 phyControlReg;
   u32 config1Reg;
   u32 retryCountReg;
+
+  // Multicast filter control
   u32 multicastFilterControlReg;
-  u32 address0Reg;
-  u32 multicastHashReg;
+
+  // MAC address (6 bytes stored as array)
+  u8 macAddress[6];
+
+  // Multicast hash filters
+  u32 multicastHashFilter0; // Possibly at 0x68
+  u32 multicastHashFilter1; // Possibly at 0x6C
+
+  // Packet limits and secondary address
   u32 maxPacketSizeReg;
-  u32 address1Reg;
+  // MAC address 2 (6 bytes stored as array)
+  u8 macAddress2[6];
 };
 
 class ETHERNET : public PCIDevice {
 public:
-  ETHERNET();
-  void Read(u64 readAddress, u64 *data, u8 byteCount) override;
-  void ConfigRead(u64 readAddress, u64 *data, u8 byteCount) override;
-  void Write(u64 writeAddress, u64 data, u8 byteCount) override;
-  void ConfigWrite(u64 writeAddress, u64 data, u8 byteCount) override;
+  ETHERNET(const std::string &deviceName, u64 size, PCIBridge *parentPCIBridge, RAM *ram);
+  void Read(u64 readAddress, u8 *data, u64 size) override;
+  void Write(u64 writeAddress, const u8 *data, u64 size) override;
+  void MemSet(u64 writeAddress, s32 data, u64 size) override;
+  void ConfigRead(u64 readAddress, u8* data, u64 size) override;
+  void ConfigWrite(u64 writeAddress, const u8* data, u64 size) override;
 
 private:
-  XE_PCI_STATE ethPciState = {0};
+  // MDIO Read
+  u32 MdioRead(u32 addr);
+  // MDIO Write
+  void MdioWrite(u32 val);
+  // RX Descriptors
+  void ProcessRxDescriptors();
+  // TX Descriptors
+  void ProcessTxDescriptors();
+  // Handle RX Packets
+  void HandleTxPacket(const u8 *data, u32 len);
+  // Handle TX Packets
+  void HandleRxPacket(const u8* data, u32 len);
+
+  // PCI Bridge pointer. Used for Interrupts.
+  PCIBridge *parentBus = nullptr;
+  // RAM Pointer
+  RAM *ramPtr = nullptr;
+  // MDIO Registers
+  u16 mdioRegisters[32][32] = {};
+  XE_PCI_STATE ethPciState = {};
+  bool rxEnabled = false;
+  bool txEnabled = false;
 };
 
-} // namespace ETHERNET
 } // namespace PCIDev
 } // namespace Xe

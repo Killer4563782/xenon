@@ -1,11 +1,9 @@
-// Copyright 2025 Xenon Emulator Project
+// Copyright 2025 Xenon Emulator Project. All rights reserved.
 
 #pragma once
 
 #include <queue>
 #include <mutex>
-
-#include "Base/Types.h"
 
 namespace Xe {
 namespace XCPU {
@@ -17,6 +15,7 @@ namespace IIC {
 //
 // Interrupt Types
 //
+
 #define PRIO_IPI_4 0x08
 #define PRIO_IPI_3 0x10
 #define PRIO_SMM 0x14
@@ -53,12 +52,15 @@ enum XE_IIC_CPU_REG {
   INT_MCACK = 0x70
 };
 
-struct XE_INT {
+// Xenon Interrupt
+struct Xe_Int {
+  // Flag for determining wheter an interrupt was ack'd to the target PPU thread
   bool ack = false;
-  u8 pendingInt = 0;
+  // Interrupt to signal
+  u64 interrupt = 0;
 };
 
-// Each logical thread has its own Interrupt Control Block.
+// Each logical thread has its own Interrupt Control Block
 struct PPE_INT_CTRL_BLCK {
   u32 REG_CPU_WHOAMI;
   u32 REG_CPU_CURRENT_TSK_PRI;
@@ -68,29 +70,30 @@ struct PPE_INT_CTRL_BLCK {
   u32 REG_EOI;
   u32 REG_EOI_SET_CPU_CURRENT_TSK_PRI;
   u32 REG_INT_MCACK;
-  std::vector<XE_INT> pendingInt;
-  // Interrupt Queue (Higher priority interrupts come first).
-  std::priority_queue<u64> intQueue;
-  // Interrupt Ack flag.
-  bool intAck = false;
+  // Stored pending interrupts.
+  std::vector<Xe_Int> interrupts;
+  // Stores whether an interrupt was already signaled to the target thread or not
+  bool intSignaled = false;
 };
 
 struct IIC_State {
-  // There are 6 total PPE's in the Xenon.
+  // There are 6 total PPE's in the Xenon
   PPE_INT_CTRL_BLCK ppeIntCtrlBlck[6] = {};
 };
 
 class XenonIIC {
 public:
   XenonIIC();
-  void writeInterrupt(u64 intAddress, u64 intData);
-  void readInterrupt(u64 intAddress, u64 *intData);
+  void writeInterrupt(u64 intAddress, const u8 *data, u64 size);
+  void readInterrupt(u64 intAddress, u8 *data, u64 size);
   bool checkExtInterrupt(u8 ppuID);
   void genInterrupt(u8 interruptType, u8 cpusToInterrupt);
-
+  void cancelInterrupt(u8 interruptType, u8 cpusInterrupted);
 private:
   IIC_State iicState;
   std::recursive_mutex mutex;
+  // Returns the name of the input interrupt ID
+  std::string getIntName(u8 intID);
 };
 } // namespace IIC
 } // namespace XCPU
